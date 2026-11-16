@@ -61,6 +61,7 @@ export async function assetView(main, params, id) {
   let devices = [];
   let usageDays = [];
   let searches = [];
+  let health = [];
   try {
     devices = await store.db.select('agent_devices', {
       asset_id: 'eq.' + id,
@@ -84,6 +85,9 @@ export async function assetView(main, params, id) {
       limit: '500',
     }) || [];
   } catch { programs = []; }
+  try {
+    health = await store.db.select('device_health', { asset_id: 'eq.' + id, select: '*', limit: '1' }) || [];
+  } catch { health = []; }
   const a = rows[0];
   if (!a) { main.innerHTML = '<div class="empty">Asset not found. <a href="#/assets">Back to assets</a></div>'; return; }
   loadAssets().catch(() => {});   // for suggestions in action forms
@@ -168,6 +172,22 @@ export async function assetView(main, params, id) {
           <td class="sub">${fmtDateTime(d.location_at || d.last_seen)}</td>
         </tr>`).join('')}
       </tbody></table></div>` : '<div class="empty">No agent on this asset yet. On a laptop or desktop, Mulk Agent records the public IP and the city and country of that IP.</div>'}
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-h"><h2>Health</h2><a href="#/control">Control</a></div>
+      ${health.length ? `<div class="card-b"><dl class="dl">
+        ${dd('Computer', esc([health[0].manufacturer, health[0].model].filter(Boolean).join(' ')))}
+        ${dd('Serial reported', esc(health[0].serial_number), 'mono')}
+        ${dd('Memory', health[0].ram_gb != null ? esc(String(health[0].ram_gb)) + ' GB' : '')}
+        ${dd('System disk', health[0].disk_free_gb != null ? esc(String(health[0].disk_free_gb)) + ' GB free' + (health[0].disk_gb != null ? ' of ' + esc(String(health[0].disk_gb)) + ' GB' : '') : '')}
+        ${dd('BitLocker', esc(health[0].bitlocker))}
+        ${dd('Defender', esc(health[0].defender) + (health[0].defender_age_hours != null ? ' · signatures ' + esc(String(health[0].defender_age_hours)) + 'h' : ''))}
+        ${dd('Firewall', esc(health[0].firewall))}
+        ${dd('Restart waiting', health[0].pending_reboot ? 'Yes' : 'No')}
+        ${dd('Local administrators', esc(health[0].local_admins))}
+        ${dd('Startup names', esc(health[0].startup_names))}
+        ${dd('Reported', fmtDateTime(health[0].reported_at))}
+      </dl></div>` : '<div class="empty">No health report yet. Mulk Agent sends encryption, Defender, firewall, disk space, the serial number, local administrator names, and startup program names. It does not read files.</div>'}
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-h"><h2>Installed software</h2><a href="#/alerts?asset=${esc(a.id)}">${programs.length ? programs.length + ' installed' : 'Alerts'}</a></div>

@@ -135,13 +135,9 @@ begin
     end if;
   end if;
 
-  rules := case policy_name
-    when 'finance' then '["USB storage blocked","Personal cloud blocked","Mail to outside addresses held","Printing a labeled file blocked","Copying a labeled file blocked"]'::jsonb
-    when 'engineering' then '["USB storage read only","Personal cloud warns","Mail to outside addresses warns","Printing a labeled file warns","Copying a labeled file warns"]'::jsonb
-    when 'legal' then '["USB storage blocked","Personal cloud blocked","Mail to outside addresses held","Printing a labeled file blocked","Copying a labeled file blocked"]'::jsonb
-    when 'executive' then '["USB storage blocked","Personal cloud blocked","Mail to outside addresses held","Printing a labeled file warns","Copying a labeled file blocked"]'::jsonb
-    when 'field' then '["USB storage read only","Personal cloud blocked","Mail to outside addresses warns","Printing a labeled file warns","Copying a labeled file warns"]'::jsonb
-    else '["USB storage blocked","Personal cloud blocked","Mail to outside addresses held","Printing a labeled file warns","Copying a labeled file warns"]'::jsonb
+  rules := case when policy_name in ('engineering', 'field')
+    then '["USB storage is read only","A plugged-in USB device is reported by its name","Installed software, health, and search text are reported","Files, the screen, and the keyboard are not collected"]'::jsonb
+    else '["USB storage is blocked","A plugged-in USB device is reported by its name","Installed software, health, and search text are reported","Files, the screen, and the keyboard are not collected"]'::jsonb
   end;
 
   return jsonb_build_object(

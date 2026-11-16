@@ -27,9 +27,10 @@
     <p class="muted">The company program for a Windows laptop or desktop. It is a separate install from the asset register. Intune is not required.</p>
     <div class="card">
       <p>The window stays on the computer with the name Mulk Agent. The person can read the rules. They can ask for admin rights. IT approves or denies that request in Control. A short approval adds that Windows account to Administrators and removes it when the time ends. USB storage follows the rule set.</p>
-      <p>Every few minutes the program sends the installed software list: program name, version, and publisher from the Windows uninstall list. The first list is the baseline. A program that appears later is an alert on the Alerts page.</p>
-      <p>It also sends the public IP address and the city and country that IP belongs to. A country other than the UAE is an alert. It does not use GPS. USB devices already connected at the first check are the baseline. A USB device plugged in after that is an alert, including a flash drive, phone, or other USB device.</p>
-      <p>While someone is at the computer, it counts active minutes and which app is in front. Google, Bing, DuckDuckGo, Yahoo, and YouTube searches made after this starts are listed under Usage. Searches already in the browser are not imported. Page contents, passwords, and document titles are not stored.</p>
+      <p>Every few minutes the program sends the installed software list: program name, version, and publisher from the Windows uninstall list. The first list is the baseline. A program that appears later is an alert on the Alerts page. It also sends health: BitLocker, Microsoft Defender, the firewall, free disk space, whether a restart is waiting, the manufacturer, model, serial, memory, the names of local administrators, and the names of startup programs. It does not read the files those programs open.</p>
+      <p>It also sends the public IP address and the city and country that IP belongs to. A country other than the UAE is an alert. It does not use GPS. USB devices already connected at the first check are the baseline. A USB device plugged in after that is an alert, by device name only. Files on the drive are not listed.</p>
+      <p>While someone is at the computer, it counts active minutes and which app is in front. Google, Bing, DuckDuckGo, Yahoo, and YouTube searches made after this starts are listed under Usage. Searches already in the browser are not imported. Page contents, documents, the screen, and the keyboard are not collected.</p>
+      <p>From Control, IT can set the built-in Administrator password once. The computer applies it and the password is then deleted. It is not written to the agent log, and the account is not enabled by that change. IT can also queue an HTTPS installer that ends in .msi or .exe. The file is downloaded, run, and deleted. This is not a remote command prompt.</p>
     </div>
     <h2>Install on one computer</h2>
     <ol>
@@ -42,7 +43,7 @@
       <li>Leave the Mulk Agent window available. It also opens at the next sign-in.</li>
     </ol>
     <h2>Update an existing install</h2>
-    <p>Computers that already have Mulk Agent keep the copy they downloaded. To pick up software reports, run this in an Administrator PowerShell. It does not need a new code.</p>
+    <p>Computers that already have Mulk Agent keep the copy they downloaded. To pick up health, the one-time password change, and remote install, run this in an Administrator PowerShell. It does not need a new code. Then close the Mulk Agent window and open it again.</p>
     <pre>powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest https://mulk-asset-manager.vercel.app/agent/MulkAgent.ps1 -OutFile C:\ProgramData\MulkAgent\MulkAgent.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Enforce"</pre>
     <h2>Remove it</h2>
     <p>In an Administrator PowerShell:</p>

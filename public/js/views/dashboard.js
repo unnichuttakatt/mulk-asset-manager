@@ -23,6 +23,8 @@ export async function dashboardView(main) {
   let software = [];
   let copies = [];
   let away = [];
+  let compliance = [];
+  let devices = [];
   try {
     [software, copies, away] = await Promise.all([
       store.db.select('software_events', { select: 'id,asset_id,name,kind,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }),
@@ -30,6 +32,14 @@ export async function dashboardView(main) {
       store.db.select('agent_devices', { select: 'asset_id,public_ip,city,country_name,country_code,location_at', outside_uae: 'eq.true', order: 'location_at.desc', limit: '8' }),
     ]);
   } catch { software = []; copies = []; away = []; }
+  try {
+    compliance = await store.db.select('compliance_alerts', { select: 'id,asset_id,kind,detail,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }) || [];
+  } catch { compliance = []; }
+  try {
+    devices = await store.db.select('agent_devices', { select: 'asset_id,hostname,last_seen', order: 'last_seen.asc', limit: '200' }) || [];
+  } catch { devices = []; }
+  const quietCutoff = Date.now() - 24 * 3600 * 1000;
+  const offline = devices.filter(d => !d.last_seen || new Date(d.last_seen).getTime() < quietCutoff);
   const by = Object.fromEntries(countBy(assets, 'status'));
   const kpi = (status, label) => `
     <a class="card kpi" href="${status ? q({ status }) : '#/assets'}">
@@ -107,6 +117,30 @@ export async function dashboardView(main) {
               <td class="sub">${fmtDateTime(r.happened_at)}</td></tr>`;
           }).join('')}
         </tbody></table></div>` : '<div class="empty">No open data-leaving reports. A removable drive is reported by its letter and volume name.</div>'}
+      </div>
+    </div>
+    <div class="grid-2" style="margin-bottom:16px">
+      <div class="card">
+        <div class="card-h"><h2>Health</h2><a href="#/alerts">${compliance.length ? compliance.length + ' open' : 'Alerts'}</a></div>
+        ${compliance.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>
+          ${compliance.map(r => {
+            const asset = assets.find(a => a.id === r.asset_id);
+            return `<tr class="clickable" data-href="#/alerts">
+              <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.detail)}</div></td>
+              <td class="sub">${fmtDateTime(r.happened_at)}</td></tr>`;
+          }).join('')}
+        </tbody></table></div>` : '<div class="empty">No open health alerts. Encryption, Defender, the firewall, disk space, and a serial mismatch are checked. Files are not read.</div>'}
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Not seen for a day</h2><a href="#/alerts">${offline.length ? offline.length + ' quiet' : 'Alerts'}</a></div>
+        ${offline.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>
+          ${offline.slice(0, 8).map(d => {
+            const asset = assets.find(a => a.id === d.asset_id);
+            return `<tr class="clickable" data-href="#/asset/${esc(d.asset_id)}">
+              <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(d.hostname || '')}</div></td>
+              <td class="sub">${d.last_seen ? fmtDateTime(d.last_seen) : 'Never'}</td></tr>`;
+          }).join('')}
+        </tbody></table></div>` : '<div class="empty">Every enrolled computer has checked in during the last day.</div>'}
       </div>
     </div>
     <div class="card">

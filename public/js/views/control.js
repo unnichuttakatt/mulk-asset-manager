@@ -8,31 +8,18 @@ import { esc, fmtDateTime, modal, toast } from '../ui.js';
 
 const LOCAL_KEY = 'am.laptop-control.v1';
 
+const HONEST = [
+  'A plugged-in USB device is reported by its name',
+  'Installed software, health, and search text are reported',
+  'Files, the screen, and the keyboard are not collected',
+];
 const POLICIES = {
-  baseline: {
-    label: 'Baseline',
-    rules: ['USB storage blocked', 'Personal cloud blocked', 'Mail to outside addresses held', 'Printing a labeled file warns', 'Copying a labeled file warns'],
-  },
-  finance: {
-    label: 'Finance',
-    rules: ['USB storage blocked', 'Personal cloud blocked', 'Mail to outside addresses held', 'Printing a labeled file blocked', 'Copying a labeled file blocked'],
-  },
-  engineering: {
-    label: 'Engineering',
-    rules: ['USB storage read only', 'Personal cloud warns', 'Mail to outside addresses warns', 'Printing a labeled file warns', 'Copying a labeled file warns'],
-  },
-  legal: {
-    label: 'Legal',
-    rules: ['USB storage blocked', 'Personal cloud blocked', 'Mail to outside addresses held', 'Printing a labeled file blocked', 'Copying a labeled file blocked'],
-  },
-  executive: {
-    label: 'Executive',
-    rules: ['USB storage blocked', 'Personal cloud blocked', 'Mail to outside addresses held', 'Printing a labeled file warns', 'Copying a labeled file blocked'],
-  },
-  field: {
-    label: 'Field',
-    rules: ['USB storage read only', 'Personal cloud blocked', 'Mail to outside addresses warns', 'Printing a labeled file warns', 'Copying a labeled file warns'],
-  },
+  baseline: { label: 'Baseline', rules: ['USB storage is blocked', ...HONEST] },
+  finance: { label: 'Finance', rules: ['USB storage is blocked', ...HONEST] },
+  engineering: { label: 'Engineering', rules: ['USB storage is read only', ...HONEST] },
+  legal: { label: 'Legal', rules: ['USB storage is blocked', ...HONEST] },
+  executive: { label: 'Executive', rules: ['USB storage is blocked', ...HONEST] },
+  field: { label: 'Field', rules: ['USB storage is read only', ...HONEST] },
 };
 
 const PRINT_MODES = {
@@ -144,6 +131,10 @@ const ui = {
   agentReady: true,
   softwareOpen: [],
   softwareReady: true,
+  health: [],
+  jobs: [],
+  resets: [],
+  opsReady: true,
   source: 'db',
   wide: true,
   controls: new Map(),
@@ -403,6 +394,33 @@ async function loadSoftwareAlerts() {
   }
 }
 
+async function loadOps() {
+  ui.health = [];
+  ui.jobs = [];
+  ui.resets = [];
+  ui.opsReady = ui.source === 'db';
+  if (ui.source !== 'db') return;
+  try {
+    const [health, jobs, resets] = await Promise.all([
+      store.db.selectAll('device_health', { select: 'asset_id,manufacturer,model,serial_number,ram_gb,disk_gb,disk_free_gb,bitlocker,defender,firewall,defender_age_hours,pending_reboot,local_admins,startup_names,reported_at' }),
+      store.db.select('install_jobs', { select: 'id,asset_id,name,status,detail,requested_at,finished_at', order: 'requested_at.desc', limit: '100' }),
+      store.db.selectAll('local_admin_resets', { select: 'asset_id,password,requested_at,applied_at,result' }),
+    ]);
+    ui.health = health || [];
+    ui.jobs = jobs || [];
+    ui.resets = (resets || []).map(r => ({
+      asset_id: r.asset_id,
+      requested_at: r.requested_at,
+      applied_at: r.applied_at,
+      result: r.result,
+      pending: Boolean(r.password),
+    }));
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+    ui.opsReady = false;
+  }
+}
+
 function pending() {
   return ui.requests.filter(r => r.status === 'pending');
 }
@@ -481,15 +499,19 @@ function watchRequests(main) {
   clearInterval(pollTimer);
   const gen = ++pollGen;
   const seenSoftware = new Set(ui.softwareOpen.map(r => String(r.id)));
+  let opsStamp = JSON.stringify([ui.jobs, ui.resets, ui.health]);
   pollTimer = setInterval(async () => {
     if (gen !== pollGen || !main.querySelector('#control-live') || document.querySelector('.modal-bg')) return;
     const seen = new Set(pending().map(r => String(r.id)));
-    try { await loadQueues(); await loadAgents(); await loadSoftwareAlerts(); } catch { return; }
+    try { await loadQueues(); await loadAgents(); await loadSoftwareAlerts(); await loadOps(); } catch { return; }
     const newSoftware = ui.softwareOpen.filter(r => !seenSoftware.has(String(r.id)));
     newSoftware.forEach(r => seenSoftware.add(String(r.id)));
     const newRequest = pending().some(r => !seen.has(String(r.id)));
+    const nextOps = JSON.stringify([ui.jobs, ui.resets, ui.health]);
+    const opsChanged = nextOps !== opsStamp;
+    opsStamp = nextOps;
     if (newSoftware.length) toast(newSoftware.length === 1 ? `New program: ${newSoftware[0].name}` : `${newSoftware.length} program changes reported`);
-    if (newRequest || newSoftware.length) {
+    if (newRequest || newSoftware.length || opsChanged) {
       if (newRequest) ui.showPopup = true;
       paint(main);
     }
@@ -505,6 +527,7 @@ export async function controlView(main) {
     await loadQueues();
     await loadAgents();
     await loadSoftwareAlerts();
+    await loadOps();
     if (pending().length) ui.showPopup = true;
   } catch (err) {
     main.innerHTML = `<div class="page-head"><div><h1>Control</h1></div></div><div class="err">${esc(err.message || String(err))}</div>`;
@@ -536,7 +559,10 @@ function paint(main) {
         <h1 id="control-live">Control</h1>
         <p>${ui.assets.length} active asset${ui.assets.length === 1 ? '' : 's'} from the register. One list for laptops, desktops, printers, phones, and everything else.</p>
       </div>
-      <button type="button" class="btn ${pending().length ? 'primary' : ''}" id="open-requests">Admin requests (${pending().length})</button>
+      <div class="row">
+        <a class="btn primary" href="/agent/install.ps1" download="MulkAgent-install.ps1">Download Mulk Agent</a>
+        <button type="button" class="btn ${pending().length ? 'primary' : ''}" id="open-requests">Admin requests (${pending().length})</button>
+      </div>
     </div>
     <div class="note" style="margin-bottom:16px">
       <strong>How a computer gets connected.</strong>
@@ -544,7 +570,7 @@ function paint(main) {
       A printer is connected when you add its queue on the company print server.
       A phone stays on the company management profile if you use one later.
       Monitors and other items stay under this register: who has them, where they are, and whether they are on hold.
-      This page records the public IP and the city and country of that IP, and alerts when the country is outside the UAE or a USB device is plugged in. It does not record GPS, keystrokes, or screenshots.
+      This page records the public IP and the city and country of that IP, and alerts when the country is outside the UAE, a USB device is plugged in, or health is off. It does not read files, capture the screen, record the keyboard, or use GPS. Mail, printing, and personal cloud contents are not inspected.
     </div>
     ${ui.source === 'local' ? `
       <div class="err" style="margin-bottom:16px">
@@ -612,7 +638,7 @@ function paint(main) {
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-h"><h2>Copy activity</h2><a href="#/alerts">Open alerts</a></div>
-      ${ui.activity.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Asset</th><th>Channel</th><th>File</th><th>Result</th></tr></thead><tbody>
+      ${ui.activity.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Asset</th><th>Channel</th><th>What</th><th>Result</th></tr></thead><tbody>
         ${ui.activity.slice(0, 20).map(e => {
           const a = assetTag(e.asset_id);
           return `<tr>
@@ -623,7 +649,7 @@ function paint(main) {
             <td><span class="badge ${e.action === 'blocked' || e.action === 'quarantined' ? 'st-broken' : 'st-under_repair'}">${esc(COPY_ACTIONS[e.action] || e.action)}</span></td>
           </tr>`;
         }).join('')}
-      </tbody></table></div>` : '<div class="empty">No copy activity yet. After a computer is enrolled, the company agent reports a USB, clipboard, cloud, email, or print attempt by file name and result. The file itself is not sent here.</div>'}
+      </tbody></table></div>` : '<div class="empty">No USB reports yet. A device plugged in after the first scan is listed by its name. Files on the drive are not listed, and the screen and keyboard are not collected.</div>'}
     </div>
     ${ui.showPopup ? requestPopup() : ''}`;
 
@@ -680,6 +706,41 @@ function networkNote(asset) {
   return `<p style="margin:0 0 8px">${away} ${esc(place || '')}</p>
     <p class="muted" style="margin:0">Public IP <span class="mono">${esc(agent.public_ip || '')}</span>${agent.local_ip ? ` · local <span class="mono">${esc(agent.local_ip)}</span>` : ''}${agent.location_at ? ` · ${esc(fmtDateTime(agent.location_at))}` : ''}</p>
     <a class="btn sm" href="#/alerts" style="margin-top:10px">Open alerts</a>`;
+}
+
+function healthFor(assetId) {
+  return (ui.health || []).find(h => h.asset_id === assetId) || null;
+}
+
+function healthNote(asset) {
+  if (!ui.opsReady) {
+    return '<p class="muted" style="margin:0">Run <span class="mono">supabase/it-admin.sql</span> once so health, a one-time local Administrator password, and remote installs can be stored.</p>';
+  }
+  const h = healthFor(asset.id);
+  if (!h) return '<p class="muted" style="margin:0">No health report yet. It arrives on the next Mulk Agent check after that computer updates its script.</p>';
+  const flag = (label, value) => {
+    const cls = value === 'off' ? 'st-broken' : value === 'on' ? 'st-available' : 'st-under_repair';
+    return `<span class="badge ${cls}">${esc(label)} ${value === 'on' ? 'on' : value === 'off' ? 'off' : 'unknown'}</span>`;
+  };
+  const disk = h.disk_free_gb != null ? `${h.disk_free_gb} GB free${h.disk_gb != null ? ` of ${h.disk_gb} GB` : ''}` : 'Disk size not reported';
+  return `<p style="margin:0 0 8px">${flag('BitLocker', h.bitlocker)} ${flag('Defender', h.defender)} ${flag('Firewall', h.firewall)}${h.pending_reboot ? ' <span class="badge st-under_repair">Restart waiting</span>' : ''}</p>
+    <p class="muted" style="margin:0">${esc([h.manufacturer, h.model].filter(Boolean).join(' '))}${h.serial_number ? ' · serial ' + esc(h.serial_number) : ''}${h.ram_gb != null ? ' · ' + esc(String(h.ram_gb)) + ' GB RAM' : ''}</p>
+    <p class="muted" style="margin:6px 0 0">${esc(disk)}${h.defender_age_hours != null ? ' · signatures ' + esc(String(h.defender_age_hours)) + ' hours old' : ''} · ${esc(fmtDateTime(h.reported_at) || '')}</p>
+    <p class="muted" style="margin:6px 0 0">Local administrators: ${esc(h.local_admins || 'not reported')}</p>
+    <p class="muted" style="margin:6px 0 0">Startup names: ${esc(h.startup_names || 'none reported')}</p>`;
+}
+
+function passwordNote(asset) {
+  const row = (ui.resets || []).find(r => r.asset_id === asset.id);
+  if (!row) return '<p class="muted" style="margin:8px 0 0">No password is stored. A change is kept only until this computer applies it, then it is deleted.</p>';
+  if (row.pending) return '<p class="muted" style="margin:8px 0 0">A password is waiting for the next check. It is not shown here again, and it is deleted after the computer applies it.</p>';
+  return `<p class="muted" style="margin:8px 0 0">Last result ${esc(fmtDateTime(row.applied_at) || '')}${row.result ? ': ' + esc(row.result) : ''}. The password is no longer stored.</p>`;
+}
+
+function jobsNote(asset) {
+  const rows = (ui.jobs || []).filter(j => j.asset_id === asset.id).slice(0, 5);
+  if (!rows.length) return '<p class="muted" style="margin:8px 0 0">No installs queued. The agent accepts an HTTPS link that ends in .msi or .exe, then deletes the file.</p>';
+  return `<ul class="muted" style="margin:8px 0 0;padding-left:18px">${rows.map(j => `<li>${esc(j.name)} · ${esc(j.status)}${j.detail ? ' · ' + esc(j.detail) : ''}</li>`).join('')}</ul>`;
 }
 
 function softwareNote(asset) {
@@ -752,11 +813,32 @@ function detail(a) {
       ${computer ? `<div>
         <h2 style="margin-bottom:8px">Mulk Agent</h2>
         <p class="muted" style="margin:0 0 10px">${agentFor(a.id)
-          ? `Installed on ${esc(agentFor(a.id).hostname || 'this computer')} for ${esc(agentFor(a.id).windows_user || 'its Windows account')}. Last seen ${esc(fmtDateTime(agentFor(a.id).last_seen) || 'not yet')}.`
-          : 'Not installed yet. Create a code, then run the installer on that computer as Administrator.'}</p>
+          ? `Installed on ${esc(agentFor(a.id).hostname || 'this computer')} for ${esc(agentFor(a.id).windows_user || 'its Windows account')}. Last seen ${esc(fmtDateTime(agentFor(a.id).last_seen) || 'not yet')}.${agentFor(a.id).last_seen && (Date.now() - new Date(agentFor(a.id).last_seen).getTime() > 24 * 3600 * 1000) ? ' Not seen for more than a day.' : ''}`
+          : 'Not installed yet. Download a setup file for this computer, or create a code and run the installer as Administrator.'}</p>
         <div class="row">
-          <button type="button" class="btn sm primary" data-act="agent-code">Create Mulk Agent code</button>
+          <button type="button" class="btn sm primary" data-act="download-setup">Download setup for this computer</button>
+          <button type="button" class="btn sm" data-act="agent-code">Create Mulk Agent code</button>
           <a class="btn sm" href="/agent/" target="_blank" rel="noopener">Install steps</a>
+        </div>
+      </div>
+      <div>
+        <h2 style="margin-bottom:8px">Health</h2>
+        ${healthNote(a)}
+      </div>
+      <div>
+        <h2 style="margin-bottom:8px">Local Administrator password</h2>
+        <p class="muted" style="margin:0">Sets the built-in Administrator password on this computer once. The account is not enabled by this change. The password is deleted from the database after it is applied, and it is not written to the agent log.</p>
+        ${passwordNote(a)}
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn sm" data-act="local-password" ${ui.opsReady ? '' : 'disabled'}>Change local admin password</button>
+        </div>
+      </div>
+      <div>
+        <h2 style="margin-bottom:8px">Remote install</h2>
+        <p class="muted" style="margin:0">Queue an HTTPS installer that ends in .msi or .exe. Mulk Agent downloads it, runs it, and deletes the file. This is not a remote command prompt.</p>
+        ${jobsNote(a)}
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn sm" data-act="install" ${ui.opsReady ? '' : 'disabled'}>Install software</button>
         </div>
       </div>
       <div>
@@ -880,6 +962,12 @@ async function act(main, asset, kind) {
       await save(main, asset, { ...c, hold: false, hold_reason: null }, 'hold', 'Hold released');
     } else if (kind === 'agent-code') {
       await askForAgentCode(asset);
+    } else if (kind === 'download-setup') {
+      await downloadSetup(asset);
+    } else if (kind === 'local-password') {
+      await askLocalPassword(main, asset);
+    } else if (kind === 'install') {
+      await askInstall(main, asset);
     } else if (kind === 'request') {
       await askForAdmin(main, asset);
     } else if (kind === 'copy') {
@@ -957,6 +1045,92 @@ async function denyRequest(main, id) {
     toast('Request denied');
     paint(main);
   } catch (err) { toast(err.message || String(err), true); }
+}
+
+function downloadText(name, text) {
+  const blob = new Blob([text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function downloadSetup(asset) {
+  const code = await store.db.rpc('agent_create_code', { p_asset_id: asset.id });
+  const text = String(code || '').replace(/^"|"$/g, '');
+  const safeTag = String(asset.tag || 'computer').replace(/[^\w.-]+/g, '_');
+  const body = `# Mulk Agent setup for ${asset.tag}
+# Run this file from an Administrator PowerShell. The code works once and expires in 24 hours.
+$dest = Join-Path $env:TEMP 'MulkAgent-install.ps1'
+Invoke-WebRequest 'https://mulk-asset-manager.vercel.app/agent/install.ps1' -OutFile $dest -UseBasicParsing
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dest -Code '${text.replace(/'/g, '')}'
+`;
+  downloadText(`MulkAgent-${safeTag}.ps1`, body);
+  toast('Setup file downloaded. Run it as Administrator on that computer.');
+}
+
+async function askLocalPassword(main, asset) {
+  let password = '';
+  const ok = await modal({
+    title: 'Local Administrator password',
+    submit: 'Send once',
+    body: `<p style="margin:0">This sets the built-in Administrator password on <b class="mono">${esc(asset.tag)}</b>. The computer applies it on the next check, then the password is deleted from the database. It is not written to the agent log, and this does not enable the account.</p>
+      <label class="f">New password<input name="password" type="password" required autocomplete="new-password"></label>
+      <label class="f">Confirm<input name="confirm" type="password" required autocomplete="new-password"></label>`,
+    onSubmit(form) {
+      password = form.password.value;
+      if (password !== form.confirm.value) throw new Error('The two passwords do not match.');
+      if (password.length < 12 || password.length > 64) throw new Error('Use 12 to 64 characters.');
+      if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
+        throw new Error('Include an upper-case letter, a lower-case letter, and a digit.');
+      }
+    },
+  });
+  if (!ok) return;
+  try {
+    await store.db.rpc('admin_set_local_password', { p_asset_id: asset.id, p_password: password });
+    toast('Password will be applied once, then removed from the database');
+    await loadOps();
+    paint(main);
+  } finally {
+    password = '';
+  }
+}
+
+async function askInstall(main, asset) {
+  let name = '';
+  let url = '';
+  let args = '';
+  const ok = await modal({
+    title: 'Install software',
+    submit: 'Queue install',
+    body: `<p style="margin:0">Mulk Agent downloads this HTTPS installer on <b class="mono">${esc(asset.tag)}</b> and runs it. Only a link ending in .msi or .exe is accepted. The file is deleted afterwards.</p>
+      <label class="f">Name<input name="name" required placeholder="Google Chrome"></label>
+      <label class="f">Installer link<input name="url" required placeholder="https://example.com/setup.msi"></label>
+      <label class="f">Silent arguments, optional<input name="args" placeholder="/S"></label>
+      <p class="muted" style="margin:8px 0 0">An MSI already runs with /qn /norestart. For an EXE, type the vendor silent switch, such as /S or /quiet. Do not paste a script.</p>`,
+    onSubmit(form) {
+      name = form.name.value.trim();
+      url = form.url.value.trim();
+      args = form.args.value.trim();
+      if (name.length < 1 || name.length > 80) throw new Error('Name the software in 80 characters or fewer.');
+      if (!/^https:\/\//i.test(url)) throw new Error('The installer link must start with https://');
+      const path = url.split('?')[0].split('#')[0];
+      if (!/\.(msi|exe)$/i.test(path)) throw new Error('The link must end in .msi or .exe');
+      if (/[;&|`$<>]/.test(args)) throw new Error('Silent arguments cannot contain shell characters.');
+    },
+  });
+  if (!ok) return;
+  await store.db.rpc('admin_queue_install', {
+    p_asset_id: asset.id,
+    p_name: name,
+    p_url: url,
+    p_silent_args: args || null,
+  });
+  toast('Install queued. The computer picks it up on the next check.');
+  await loadOps();
+  paint(main);
 }
 
 async function askForAgentCode(asset) {

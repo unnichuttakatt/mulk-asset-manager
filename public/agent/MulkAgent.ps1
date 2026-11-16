@@ -604,6 +604,194 @@ function Ensure-SampleTask {
   }
 }
 
+function Json-Text($Value) {
+  if ($null -eq $Value) { return 'null' }
+  $text = [string]$Value
+  if ($text.Length -gt 500) { $text = $text.Substring(0, 500) }
+  return ConvertTo-Json -InputObject $text -Compress
+}
+
+function Json-Number($Value) {
+  if ($null -eq $Value -or $Value -eq '') { return 'null' }
+  return (([string]$Value) -replace ',', '.')
+}
+
+function Get-HealthReport {
+  $report = @{
+    manufacturer = ''; model = ''; serial = ''
+    ram = $null; disk = $null; free = $null
+    bitlocker = 'unknown'; defender = 'unknown'; defenderAge = $null
+    firewall = 'unknown'; reboot = $false; admins = ''; startup = ''
+  }
+  try {
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    $report.manufacturer = [string]$cs.Manufacturer
+    $report.model = [string]$cs.Model
+    if ($cs.TotalPhysicalMemory) { $report.ram = [math]::Round(($cs.TotalPhysicalMemory / 1GB), 1) }
+  } catch { }
+  try {
+    $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop
+    $report.serial = [string]$bios.SerialNumber
+  } catch { }
+  try {
+    $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
+    if ($disk.Size) { $report.disk = [math]::Round(($disk.Size / 1GB), 1) }
+    if ($null -ne $disk.FreeSpace) { $report.free = [math]::Round(($disk.FreeSpace / 1GB), 1) }
+  } catch { }
+  try {
+    $vol = Get-CimInstance -Namespace 'root\cimv2\security\microsoftvolumeencryption' -ClassName Win32_EncryptableVolume -Filter "DriveLetter='C:'" -ErrorAction Stop
+    if ([int]$vol.ProtectionStatus -eq 1) { $report.bitlocker = 'on' }
+    elseif ([int]$vol.ProtectionStatus -eq 0) { $report.bitlocker = 'off' }
+  } catch { }
+  try {
+    $st = Get-MpComputerStatus -ErrorAction Stop
+    $report.defender = $(if ([bool]$st.RealTimeProtectionEnabled -and [bool]$st.AntivirusEnabled) { 'on' } else { 'off' })
+    if ($st.AntivirusSignatureLastUpdated) {
+      $report.defenderAge = [int][math]::Floor(((Get-Date) - [datetime]$st.AntivirusSignatureLastUpdated).TotalHours)
+    }
+  } catch { }
+  try {
+    $profiles = @(Get-NetFirewallProfile -ErrorAction Stop)
+    if ($profiles.Count -gt 0) {
+      $anyOff = $false
+      foreach ($p in $profiles) { if (-not [bool]$p.Enabled) { $anyOff = $true } }
+      $report.firewall = $(if ($anyOff) { 'off' } else { 'on' })
+    }
+  } catch { }
+  if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $report.reboot = $true }
+  if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $report.reboot = $true }
+  try {
+    $raw = & "$env:SystemRoot\System32\net.exe" localgroup Administrators 2>$null
+    $names = @()
+    $capture = $false
+    foreach ($line in @($raw)) {
+      if ($line -match '^-+$') { $capture = $true; continue }
+      if (-not $capture) { continue }
+      if ($line -match 'command completed') { break }
+      $name = ([string]$line).Trim()
+      if ($name) { $names += $name }
+    }
+    $report.admins = ((@($names | Select-Object -Unique) -join ', '))
+  } catch { }
+  try {
+    $names = @()
+    foreach ($path in @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'
+    )) {
+      $item = Get-Item -Path $path -ErrorAction SilentlyContinue
+      if (-not $item) { continue }
+      foreach ($n in @($item.GetValueNames())) {
+        if ($n -and $n -ne '(default)') { $names += [string]$n }
+      }
+    }
+    $report.startup = ((@($names | Select-Object -Unique) -join ', '))
+  } catch { }
+  return $report
+}
+
+function Send-Health($Config) {
+  $h = Get-HealthReport
+  $reboot = $(if ($h.reboot) { 'true' } else { 'false' })
+  $tokenJson = ConvertTo-Json -InputObject ([string]$Config.token) -Compress
+  $json = '{"p_token":' + $tokenJson +
+    ',"p_manufacturer":' + (Json-Text $h.manufacturer) +
+    ',"p_model":' + (Json-Text $h.model) +
+    ',"p_serial":' + (Json-Text $h.serial) +
+    ',"p_ram_gb":' + (Json-Number $h.ram) +
+    ',"p_disk_gb":' + (Json-Number $h.disk) +
+    ',"p_disk_free_gb":' + (Json-Number $h.free) +
+    ',"p_bitlocker":' + (Json-Text $h.bitlocker) +
+    ',"p_defender":' + (Json-Text $h.defender) +
+    ',"p_firewall":' + (Json-Text $h.firewall) +
+    ',"p_defender_age_hours":' + (Json-Number $h.defenderAge) +
+    ',"p_pending_reboot":' + $reboot +
+    ',"p_local_admins":' + (Json-Text $h.admins) +
+    ',"p_startup_names":' + (Json-Text $h.startup) + '}'
+  Invoke-AgentRpc $Config 'agent_report_health' $null $json
+  Write-AgentLog 'Health report sent. Files, the screen, and the keyboard were not collected.'
+}
+
+function Apply-PendingAdminPassword($Config) {
+  $secret = Invoke-AgentRpc $Config 'agent_take_local_password' @{ p_token = [string]$Config.token }
+  if (-not $secret) { return }
+  $secret = [string]$secret
+  $ok = $false
+  $detail = 'Local Administrator password changed'
+  try {
+    $account = [ADSI]'WinNT://./Administrator,user'
+    $account.SetPassword($secret)
+    $ok = $true
+  } catch {
+    $detail = [string]$_.Exception.Message
+    if ($secret -and $detail.Contains($secret)) { $detail = 'The password change failed.' }
+    if ($detail.Length -gt 160) { $detail = $detail.Substring(0, 160) }
+  } finally {
+    $secret = $null
+  }
+  Invoke-AgentRpc $Config 'agent_finish_local_password' @{
+    p_token = [string]$Config.token
+    p_ok = $ok
+    p_detail = $detail
+  }
+  if ($ok) { Write-AgentLog 'Local Administrator password was changed. The password is not written here.' }
+  else { Write-AgentLog 'Local Administrator password change failed. The password is not written here.' }
+}
+
+function Split-InstallArgs([string]$Text) {
+  if (-not $Text) { return @() }
+  return @($Text -split '\s+' | Where-Object { $_ })
+}
+
+function Invoke-PendingInstall($Config) {
+  $job = Invoke-AgentRpc $Config 'agent_take_install' @{ p_token = [string]$Config.token }
+  if (-not $job -or -not $job.id) { return }
+  $name = [string]$job.name
+  $url = [string]$job.source_url
+  $extra = [string]$job.silent_args
+  $ok = $false
+  $detail = ''
+  $file = $null
+  try {
+    if ($url -notmatch '^https://') { throw 'The installer link is not https.' }
+    $ext = [IO.Path]::GetExtension(([uri]$url).AbsolutePath).ToLowerInvariant()
+    if ($ext -notin @('.msi', '.exe')) { throw 'Only an MSI or EXE installer is accepted.' }
+    if ($extra -match '[;&|`$<>]') { throw 'The silent arguments contain a character that is not allowed.' }
+    $dir = Join-Path $Root 'installs'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $file = Join-Path $dir ([guid]::NewGuid().ToString('N') + $ext)
+    Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing -TimeoutSec 900
+    $len = (Get-Item -Path $file).Length
+    if ($len -lt 1024) { throw 'The download is too small to be an installer.' }
+    if ($len -gt 700MB) { throw 'The installer is larger than 700 MB.' }
+    $extraArgs = Split-InstallArgs $extra
+    if ($ext -eq '.msi') {
+      $argList = @('/i', $file, '/qn', '/norestart') + $extraArgs
+      $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $argList -Wait -PassThru
+    } elseif ($extraArgs.Count -gt 0) {
+      $proc = Start-Process -FilePath $file -ArgumentList $extraArgs -Wait -PassThru
+    } else {
+      $proc = Start-Process -FilePath $file -Wait -PassThru
+    }
+    $code = [int]$proc.ExitCode
+    if ($code -eq 0) { $ok = $true; $detail = 'Installed' }
+    elseif ($code -eq 3010 -or $code -eq 1641) { $ok = $true; $detail = 'Installed. Windows may ask for a restart.' }
+    else { $detail = "Installer exited with code $code" }
+  } catch {
+    $detail = [string]$_.Exception.Message
+    if ($detail.Length -gt 240) { $detail = $detail.Substring(0, 240) }
+  } finally {
+    if ($file -and (Test-Path -Path $file)) { Remove-Item -Path $file -Force -ErrorAction SilentlyContinue }
+  }
+  Invoke-AgentRpc $Config 'agent_finish_install' @{
+    p_token = [string]$Config.token
+    p_job = [string]$job.id
+    p_ok = $ok
+    p_detail = $detail
+  }
+  Write-AgentLog ("Install " + $name + ": " + $detail)
+}
+
 function Invoke-Enforce {
   $config = Get-AgentConfig
   $policy = Get-Policy $config
@@ -616,6 +804,9 @@ function Invoke-Enforce {
   if ($usb -notin @('block', 'read', 'allow')) { $usb = 'block' }
   Set-UsbPolicy $usb
   try { Send-SoftwareInventory $config } catch { Write-AgentLog ("Software report failed: " + $_.Exception.Message) }
+  try { Send-Health $config } catch { Write-AgentLog ("Health report failed: " + $_.Exception.Message) }
+  try { Apply-PendingAdminPassword $config } catch { Write-AgentLog 'Password change failed before it could be confirmed. The password is not written here.' }
+  try { Invoke-PendingInstall $config } catch { Write-AgentLog ("Install failed: " + $_.Exception.Message) }
   try { Send-UsbNotices $config $policy } catch { Write-AgentLog ("USB report failed: " + $_.Exception.Message) }
   try { Send-Presence $config } catch { Write-AgentLog ("Location report failed: " + $_.Exception.Message) }
   try { Ensure-SampleTask } catch { Write-AgentLog ("Activity schedule failed: " + $_.Exception.Message) }
@@ -658,8 +849,8 @@ if (-not $mutex.WaitOne(0, $false)) { exit 0 }
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Mulk Agent'
 $form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(520, 740)
-$form.MinimumSize = New-Object System.Drawing.Size(480, 660)
+$form.Size = New-Object System.Drawing.Size(520, 780)
+$form.MinimumSize = New-Object System.Drawing.Size(480, 700)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 $form.BackColor = [System.Drawing.Color]::FromArgb(244, 245, 247)
 
@@ -671,52 +862,52 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, USB devices, the city and country of the public IP, web searches, active time, and which app is in front. It does not read page contents, passwords, documents, keystrokes, screenshots, or GPS.'
-$intro.Size = New-Object System.Drawing.Size(460, 72)
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer and a one-time local Administrator password change. It does not read files, capture the screen, record the keyboard, or use GPS. The password is not written to the log.'
+$intro.Size = New-Object System.Drawing.Size(460, 96)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
 
 $status = New-Object System.Windows.Forms.Label
 $status.Size = New-Object System.Drawing.Size(460, 96)
-$status.Location = New-Object System.Drawing.Point(20, 132)
+$status.Location = New-Object System.Drawing.Point(20, 156)
 $form.Controls.Add($status)
 
 $rules = New-Object System.Windows.Forms.ListBox
 $rules.Size = New-Object System.Drawing.Size(460, 130)
-$rules.Location = New-Object System.Drawing.Point(20, 236)
+$rules.Location = New-Object System.Drawing.Point(20, 260)
 $form.Controls.Add($rules)
 
 $nameLabel = New-Object System.Windows.Forms.Label
 $nameLabel.Text = 'Your name'
-$nameLabel.Location = New-Object System.Drawing.Point(20, 378)
+$nameLabel.Location = New-Object System.Drawing.Point(20, 402)
 $nameLabel.AutoSize = $true
 $form.Controls.Add($nameLabel)
 
 $nameBox = New-Object System.Windows.Forms.TextBox
-$nameBox.Location = New-Object System.Drawing.Point(20, 400)
+$nameBox.Location = New-Object System.Drawing.Point(20, 424)
 $nameBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($nameBox)
 
 $reasonLabel = New-Object System.Windows.Forms.Label
 $reasonLabel.Text = 'Why you need admin rights'
-$reasonLabel.Location = New-Object System.Drawing.Point(20, 436)
+$reasonLabel.Location = New-Object System.Drawing.Point(20, 460)
 $reasonLabel.AutoSize = $true
 $form.Controls.Add($reasonLabel)
 
 $reasonBox = New-Object System.Windows.Forms.TextBox
-$reasonBox.Location = New-Object System.Drawing.Point(20, 458)
+$reasonBox.Location = New-Object System.Drawing.Point(20, 482)
 $reasonBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($reasonBox)
 
 $ask = New-Object System.Windows.Forms.Button
 $ask.Text = 'Request admin rights'
-$ask.Location = New-Object System.Drawing.Point(20, 498)
+$ask.Location = New-Object System.Drawing.Point(20, 522)
 $ask.Size = New-Object System.Drawing.Size(180, 34)
 $form.Controls.Add($ask)
 
 $refresh = New-Object System.Windows.Forms.Button
 $refresh.Text = 'Refresh'
-$refresh.Location = New-Object System.Drawing.Point(210, 498)
+$refresh.Location = New-Object System.Drawing.Point(210, 522)
 $refresh.Size = New-Object System.Drawing.Size(100, 34)
 $form.Controls.Add($refresh)
 
@@ -724,7 +915,7 @@ $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Multiline = $true
 $logBox.ReadOnly = $true
 $logBox.ScrollBars = 'Vertical'
-$logBox.Location = New-Object System.Drawing.Point(20, 546)
+$logBox.Location = New-Object System.Drawing.Point(20, 570)
 $logBox.Size = New-Object System.Drawing.Size(460, 80)
 $form.Controls.Add($logBox)
 

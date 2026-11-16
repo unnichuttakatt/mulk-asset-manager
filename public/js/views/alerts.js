@@ -8,6 +8,17 @@ import { esc, fmtDate, fmtDateTime, toast } from '../ui.js';
 const CHANNELS = { usb: 'USB', clipboard: 'Clipboard', cloud: 'Personal cloud', mail: 'Outside email', print: 'Print' };
 const COPY_ACTIONS = { blocked: 'Blocked', warned: 'Warned', quarantined: 'Quarantined', plugged: 'Plugged' };
 
+const COMPLIANCE = {
+  bitlocker: 'BitLocker',
+  defender: 'Defender',
+  firewall: 'Firewall',
+  disk: 'Disk space',
+  serial: 'Serial number',
+  local_admin: 'Local administrators',
+  startup: 'Startup programs',
+  banned: 'Banned program',
+};
+
 const ui = {
   ready: true,
   openOnly: true,
@@ -16,6 +27,9 @@ const ui = {
   software: [],
   copies: [],
   places: [],
+  compliance: [],
+  devices: [],
+  banned: [],
   assets: [],
 };
 
@@ -65,6 +79,28 @@ async function load() {
     ui.ready = false;
   }
   await loadPrograms();
+  await loadOps();
+}
+
+async function loadOps() {
+  ui.compliance = [];
+  ui.devices = [];
+  ui.banned = [];
+  try {
+    const query = { select: 'id,asset_id,kind,detail,happened_at,acknowledged_at', order: 'happened_at.desc', limit: '200' };
+    if (ui.openOnly) query.acknowledged_at = 'is.null';
+    ui.compliance = await store.db.select('compliance_alerts', query) || [];
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+  }
+  try {
+    ui.devices = await store.db.select('agent_devices', { select: 'asset_id,hostname,last_seen', order: 'last_seen.asc', limit: '300' }) || [];
+  } catch { ui.devices = []; }
+  try {
+    ui.banned = await store.db.select('banned_programs', { select: 'name_key,label,created_at', order: 'label.asc', limit: '200' }) || [];
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+  }
 }
 
 async function loadPrograms() {
@@ -104,6 +140,9 @@ function paint(main) {
   const openSoftware = ui.software.filter(r => !r.acknowledged_at).length;
   const openCopies = ui.copies.filter(r => !r.acknowledged_at).length;
   const openPlaces = ui.places.filter(r => !r.acknowledged_at).length;
+  const openHealth = ui.compliance.filter(r => !r.acknowledged_at).length;
+  const cutoff = Date.now() - 24 * 3600 * 1000;
+  const offline = ui.devices.filter(d => !d.last_seen || new Date(d.last_seen).getTime() < cutoff);
   const options = assetOptions().map(a => `<option value="${esc(a.id)}" ${a.id === ui.assetId ? 'selected' : ''}>${esc(a.tag)} · ${esc(a.assigned_to || a.description || '')}</option>`).join('');
   const selected = assetOf(ui.assetId);
 
@@ -111,11 +150,11 @@ function paint(main) {
     <div class="page-head">
       <div>
         <h1>Alerts</h1>
-        <p>New programs and data leaving a computer. The first software report from a machine is its baseline. A program that shows up after that is listed here.</p>
+        <p>New programs, USB devices, computers outside the UAE, and health. Files, the screen, and the keyboard are not collected. The first software, USB, and startup report from a machine is its baseline.</p>
       </div>
       <div class="row">
         <button type="button" class="btn" id="toggle-open">${ui.openOnly ? 'Show history' : 'Open only'}</button>
-        ${(openSoftware + openCopies + openPlaces) ? '<button type="button" class="btn primary" id="ack-all">Mark open as reviewed</button>' : ''}
+        ${(openSoftware + openCopies + openPlaces + openHealth) ? '<button type="button" class="btn primary" id="ack-all">Mark open as reviewed</button>' : ''}
       </div>
     </div>
     ${ui.ready ? '' : `<div class="err" style="margin-bottom:16px"><strong>Software reports are not stored yet.</strong> Run <span class="mono">supabase/asset-admin.sql</span> once in the Supabase SQL editor. It is safe to re-run.</div>`}
@@ -123,6 +162,40 @@ function paint(main) {
       <div class="card kpi"><div class="k-label">Outside UAE</div><div class="k-val">${openPlaces}</div></div>
       <div class="card kpi"><div class="k-label">USB and data leaving</div><div class="k-val">${openCopies}</div></div>
       <div class="card kpi"><div class="k-label">New programs</div><div class="k-val">${openSoftware}</div></div>
+      <div class="card kpi"><div class="k-label">Health</div><div class="k-val">${openHealth}</div></div>
+      <div class="card kpi"><div class="k-label">Quiet for a day</div><div class="k-val">${offline.length}</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-h"><h2>Not seen for a day</h2><span class="muted">Live status, from the last check-in</span></div>
+      ${offline.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Asset</th><th>Computer</th><th>Last seen</th></tr></thead><tbody>
+        ${offline.map(d => `<tr>
+          <td><a href="#/asset/${esc(d.asset_id)}">${tagOf(d.asset_id)}</a></td>
+          <td>${esc(d.hostname || '')}</td>
+          <td>${d.last_seen ? fmtDateTime(d.last_seen) : 'Never'}</td>
+        </tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">Every enrolled computer has checked in during the last day, or none are enrolled yet.</div>'}
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-h"><h2>Health</h2><span class="muted">Encryption, Defender, firewall, disk, serial, local admins, startup</span></div>
+      ${ui.compliance.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Asset</th><th>Check</th><th>Detail</th><th></th></tr></thead><tbody>
+        ${ui.compliance.map(r => `<tr>
+          <td>${fmtDateTime(r.happened_at)}</td>
+          <td><a href="#/asset/${esc(r.asset_id)}">${tagOf(r.asset_id)}</a></td>
+          <td>${esc(COMPLIANCE[r.kind] || r.kind)}</td>
+          <td>${esc(r.detail)}</td>
+          <td style="text-align:right">${r.acknowledged_at ? '<span class="muted">Reviewed</span>' : `<button type="button" class="btn sm" data-ack="compliance_alerts" data-id="${esc(r.id)}">Mark reviewed</button>`}</td>
+        </tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">No health alerts. BitLocker, Defender, or the firewall being off, low disk, a serial that does not match the asset, a banned program, or a change in local administrators or startup names appears here. A restart waiting is shown on the computer, not as an alert.</div>'}
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-h"><h2>Banned programs</h2><span class="muted">Matched to the installed name</span></div>
+      <div class="card-b">
+        <form id="ban-form" class="row">
+          <label class="f" style="flex:1;min-width:220px;margin:0">Program name<input name="label" required placeholder="AnyDesk" maxlength="80"></label>
+          <button class="btn" type="submit">Ban</button>
+        </form>
+        ${ui.banned.length ? `<ul class="muted" style="margin:12px 0 0;padding-left:18px">${ui.banned.map(b => `<li>${esc(b.label)} <button type="button" class="btn sm" data-unban="${esc(b.name_key)}">Remove</button></li>`).join('')}</ul>` : '<p class="muted" style="margin:12px 0 0">No names are banned. Type the program name exactly as it appears in the installed list. A computer that has that name is listed under Health after its next check.</p>'}
+      </div>
     </div>
     <div class="card" style="margin-bottom:16px">
       <div class="card-h"><h2>Outside the UAE</h2><span class="muted">City and country of the public IP</span></div>
@@ -191,6 +264,7 @@ function paint(main) {
       for (const r of ui.software) if (!r.acknowledged_at) jobs.push(acknowledge('software_events', r.id));
       for (const r of ui.copies) if (!r.acknowledged_at) jobs.push(acknowledge('copy_activity', r.id));
       for (const r of ui.places) if (!r.acknowledged_at) jobs.push(acknowledge('location_events', r.id));
+      for (const r of ui.compliance) if (!r.acknowledged_at) jobs.push(acknowledge('compliance_alerts', r.id));
       await Promise.all(jobs);
       toast('Marked as reviewed');
       await refresh(main);
@@ -201,6 +275,27 @@ function paint(main) {
       try {
         await acknowledge(btn.dataset.ack, btn.dataset.id);
         toast('Marked as reviewed');
+        await refresh(main);
+      } catch (err) { toast(err.message || String(err), true); }
+    };
+  });
+  document.getElementById('ban-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const label = new FormData(e.target).get('label').toString().trim();
+    const name_key = label.toLowerCase();
+    if (name_key.length < 3) { toast('Use at least 3 characters so a short name does not match too widely.', true); return; }
+    if (/[",]/.test(label)) { toast('Leave out commas and quotes. Use the program name as Windows lists it.', true); return; }
+    try {
+      await store.db.insert('banned_programs', { name_key, label });
+      toast('Banned. A computer that has it is reported on the next check.');
+      await refresh(main);
+    } catch (err) { toast(err.message || String(err), true); }
+  });
+  main.querySelectorAll('[data-unban]').forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        await store.db.remove('banned_programs', { name_key: 'eq.' + btn.dataset.unban });
+        toast('Removed from the banned list');
         await refresh(main);
       } catch (err) { toast(err.message || String(err), true); }
     };
