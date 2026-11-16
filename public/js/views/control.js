@@ -2,6 +2,7 @@
 // Computers, printers, and phones store a decision here. A visible enrollment
 // on the device is what applies it. It records the public IP and the city
 // and country of that IP. It does not record GPS, keystrokes, or screenshots.
+// Remote support opens Windows Quick Assist on the signed-in screen. The screen is not saved.
 
 import { store, loadAssets, ctx } from '../data.js';
 import { esc, fmtDateTime, modal, toast } from '../ui.js';
@@ -135,6 +136,9 @@ const ui = {
   health: [],
   jobs: [],
   resets: [],
+  support: [],
+  supportReady: true,
+  showHelp: false,
   opsReady: true,
   lockReady: true,
   source: 'db',
@@ -428,7 +432,9 @@ async function loadOps() {
   ui.health = [];
   ui.jobs = [];
   ui.resets = [];
+  ui.support = [];
   ui.opsReady = ui.source === 'db';
+  ui.supportReady = ui.source === 'db';
   if (ui.source !== 'db') return;
   try {
     const [health, jobs, resets] = await Promise.all([
@@ -449,10 +455,24 @@ async function loadOps() {
     if (!missingTable(err)) throw err;
     ui.opsReady = false;
   }
+  try {
+    ui.support = await store.db.select('support_sessions', {
+      select: 'id,asset_id,status,requested_by,reason,detail,requested_at,opened_at,ended_at',
+      order: 'requested_at.desc',
+      limit: '50',
+    }) || [];
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+    ui.supportReady = false;
+  }
 }
 
 function pending() {
   return ui.requests.filter(r => r.status === 'pending');
+}
+
+function helpWaiting() {
+  return (ui.support || []).filter(s => s.status === 'requested');
 }
 
 function assetTag(id) {
@@ -529,20 +549,24 @@ function watchRequests(main) {
   clearInterval(pollTimer);
   const gen = ++pollGen;
   const seenSoftware = new Set(ui.softwareOpen.map(r => String(r.id)));
-  let opsStamp = JSON.stringify([ui.jobs, ui.resets, ui.health]);
+  let opsStamp = JSON.stringify([ui.jobs, ui.resets, ui.health, ui.support]);
   pollTimer = setInterval(async () => {
     if (gen !== pollGen || !main.querySelector('#control-live') || document.querySelector('.modal-bg')) return;
     const seen = new Set(pending().map(r => String(r.id)));
+    const seenHelp = new Set(helpWaiting().map(r => String(r.id)));
     try { await loadQueues(); await loadAgents(); await loadSoftwareAlerts(); await loadOps(); } catch { return; }
     const newSoftware = ui.softwareOpen.filter(r => !seenSoftware.has(String(r.id)));
     newSoftware.forEach(r => seenSoftware.add(String(r.id)));
     const newRequest = pending().some(r => !seen.has(String(r.id)));
-    const nextOps = JSON.stringify([ui.jobs, ui.resets, ui.health]);
+    const newHelp = helpWaiting().some(r => !seenHelp.has(String(r.id)));
+    const nextOps = JSON.stringify([ui.jobs, ui.resets, ui.health, ui.support]);
     const opsChanged = nextOps !== opsStamp;
     opsStamp = nextOps;
     if (newSoftware.length) toast(newSoftware.length === 1 ? `New program: ${newSoftware[0].name}` : `${newSoftware.length} program changes reported`);
-    if (newRequest || newSoftware.length || opsChanged) {
+    if (newHelp) toast(helpWaiting().length === 1 ? 'Someone asked for remote help' : `${helpWaiting().length} people asked for remote help`);
+    if (newRequest || newHelp || newSoftware.length || opsChanged) {
       if (newRequest) ui.showPopup = true;
+      if (newHelp) ui.showHelp = true;
       paint(main);
     }
   }, 15000);
@@ -559,6 +583,7 @@ export async function controlView(main) {
     await loadSoftwareAlerts();
     await loadOps();
     if (pending().length) ui.showPopup = true;
+    if (helpWaiting().length) ui.showHelp = true;
   } catch (err) {
     main.innerHTML = `<div class="page-head"><div><h1>Control</h1></div></div><div class="err">${esc(err.message || String(err))}</div>`;
     return;
@@ -592,6 +617,7 @@ function paint(main) {
       </div>
       <div class="row">
         <a class="btn primary" href="/agent/install.ps1" download="MulkAgent-install.ps1">Download Mulk Agent</a>
+        <button type="button" class="btn ${helpWaiting().length ? 'primary' : ''}" id="open-help">Remote help (${helpWaiting().length})</button>
         <button type="button" class="btn ${pending().length ? 'primary' : ''}" id="open-requests">Admin requests (${pending().length})</button>
       </div>
     </div>
@@ -683,6 +709,7 @@ function paint(main) {
         }).join('')}
       </tbody></table></div>` : '<div class="empty">No USB reports yet. A device plugged in after the first scan is listed by its name. Files on the drive are not listed, and the screen and keyboard are not collected.</div>'}
     </div>
+    ${ui.showHelp ? helpPopup() : ''}
     ${ui.showPopup ? requestPopup() : ''}`;
 
   const qEl = document.getElementById('cq');
@@ -703,6 +730,17 @@ function paint(main) {
       toast('Could not copy. Open supabase/laptop-control.sql in the project.', true);
     }
   }));
+  document.getElementById('open-help').onclick = () => { ui.showHelp = true; paint(main); };
+  document.getElementById('close-help')?.addEventListener('click', () => { ui.showHelp = false; paint(main); });
+  document.getElementById('help-pop')?.addEventListener('mousedown', (e) => {
+    if (e.target.id === 'help-pop') { ui.showHelp = false; paint(main); }
+  });
+  main.querySelectorAll('[data-connect]').forEach(btn => {
+    btn.onclick = () => connectHelp(main, btn.dataset.connect);
+  });
+  main.querySelectorAll('[data-decline-help]').forEach(btn => {
+    btn.onclick = () => declineHelp(main, btn.dataset.declineHelp);
+  });
   document.getElementById('open-requests').onclick = () => { ui.showPopup = true; paint(main); };
   document.getElementById('close-requests')?.addEventListener('click', () => { ui.showPopup = false; paint(main); });
   document.getElementById('request-pop')?.addEventListener('mousedown', (e) => {
@@ -767,6 +805,23 @@ function passwordNote(asset) {
   if (!row) return '<p class="muted" style="margin:8px 0 0">No password is stored. A change is kept only until this computer applies it, then it is deleted.</p>';
   if (row.pending) return '<p class="muted" style="margin:8px 0 0">A password is waiting for the next check. It is not shown here again, and it is deleted after the computer applies it.</p>';
   return `<p class="muted" style="margin:8px 0 0">Last result ${esc(fmtDateTime(row.applied_at) || '')}${row.result ? ': ' + esc(row.result) : ''}. The password is no longer stored.</p>`;
+}
+
+function supportNote(asset) {
+  if (!ui.supportReady) {
+    return '<p class="muted" style="margin:8px 0 0">Run <span class="mono">supabase/support.sql</span> once so remote support can be queued.</p>';
+  }
+  const rows = (ui.support || []).filter(s => s.asset_id === asset.id).slice(0, 3);
+  if (!rows.length) return '<p class="muted" style="margin:8px 0 0">No help request yet. The person asks from the Mulk Agent window. Nothing connects until they choose Allow.</p>';
+  const label = {
+    requested: 'Asked for help',
+    pending: 'Waiting for them to allow',
+    asking: 'Allow prompt is on their screen',
+    opened: 'They allowed it',
+    failed: 'Did not connect',
+    ended: 'Ended',
+  };
+  return `<ul class="muted" style="margin:8px 0 0;padding-left:18px">${rows.map(s => `<li>${esc(label[s.status] || s.status)}${s.detail ? ' · ' + esc(s.detail) : ''} · ${esc(fmtDateTime(s.requested_at) || '')}</li>`).join('')}</ul>`;
 }
 
 function jobsNote(asset) {
@@ -871,6 +926,14 @@ function detail(a) {
         ${jobsNote(a)}
         <div class="row" style="margin-top:10px">
           <button type="button" class="btn sm" data-act="install" ${ui.opsReady ? '' : 'disabled'}>Install software</button>
+        </div>
+      </div>
+      <div>
+        <h2 style="margin-bottom:8px">Remote support</h2>
+        <p class="muted" style="margin:0">The person asks from the Mulk Agent window, or you can ask from here. Either way, Quick Assist opens only after they choose Allow on that computer. The screen is not saved, and the keyboard is not recorded.</p>
+        ${supportNote(a)}
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn sm" data-act="support" ${ui.supportReady && !c.locked && !(ui.support || []).some(s => s.asset_id === a.id && (s.status === 'pending' || s.status === 'asking')) ? '' : 'disabled'}>${helpWaiting().some(s => s.asset_id === a.id) ? 'Connect' : 'Ask to connect'}</button>
         </div>
       </div>
       <div>
@@ -1023,6 +1086,8 @@ async function act(main, asset, kind) {
       await askLocalPassword(main, asset);
     } else if (kind === 'install') {
       await askInstall(main, asset);
+    } else if (kind === 'support') {
+      await askSupport(main, asset);
     } else if (kind === 'request') {
       await askForAdmin(main, asset);
     } else if (kind === 'copy') {
@@ -1031,6 +1096,30 @@ async function act(main, asset, kind) {
   } catch (err) {
     toast(err.message || String(err), true);
   }
+}
+
+function helpPopup() {
+  const rows = helpWaiting();
+  return `<div class="modal-bg" id="help-pop">
+    <div class="pop-card">
+      <div class="card-h"><h2>Remote help</h2><button type="button" class="btn ghost icon-btn" id="close-help" aria-label="Close">✕</button></div>
+      <div class="card-b">
+        <p class="muted" style="margin:0 0 12px">The person asked from the Mulk Agent window. Connect asks them to choose Allow. Quick Assist opens only after they do. The screen is not saved.</p>
+        ${rows.length ? rows.map(r => {
+          const a = assetTag(r.asset_id);
+          return `<div class="req">
+            <div><strong>${esc(r.requested_by)}</strong> · ${a ? `<span class="tag">${esc(a.tag)}</span> ${esc(a.description || '')}` : 'Asset not in the active list'}</div>
+            <p style="margin:6px 0">${esc(r.reason || '')}</p>
+            <div class="sub">${fmtDateTime(r.requested_at)}</div>
+            <div class="row" style="margin-top:8px">
+              <button type="button" class="btn sm primary" data-connect="${esc(r.id)}">Connect</button>
+              <button type="button" class="btn sm danger" data-decline-help="${esc(r.id)}">Decline</button>
+            </div>
+          </div>`;
+        }).join('') : '<p class="muted" style="margin:0">Nobody is waiting. A request appears here when someone chooses Request remote help on their computer.</p>'}
+      </div>
+    </div>
+  </div>`;
 }
 
 function requestPopup() {
@@ -1186,6 +1275,84 @@ async function askInstall(main, asset) {
   toast('Install queued. The computer picks it up on the next check.');
   await loadOps();
   paint(main);
+}
+
+async function supportCodeFromForm() {
+  let code = '';
+  const ok = await modal({
+    title: 'Ask them to allow',
+    submit: 'Ask to connect',
+    body: `<p style="margin:0">Nothing opens until the person chooses Allow on that computer. On your own PC, open Quick Assist and choose Help someone. Paste the code so their screen can show it after they allow.</p>
+      <label class="f">Quick Assist code, optional<input name="code" inputmode="numeric" maxlength="8" placeholder="6 digit code" autocomplete="off"></label>
+      <p class="muted" style="margin:8px 0 0">Leave this blank if you will read the code to them after they allow. The screen is not saved.</p>`,
+    onSubmit(form) {
+      code = form.code.value.trim();
+      if (code && !/^[0-9]{6,8}$/.test(code)) throw new Error('The Quick Assist code is 6 to 8 digits, or leave it blank.');
+    },
+  });
+  return ok ? code : null;
+}
+
+async function connectHelp(main, id) {
+  const row = helpWaiting().find(r => String(r.id) === String(id));
+  if (!row) return;
+  const asset = assetTag(row.asset_id);
+  if (asset && current(asset).locked) {
+    toast('Unlock the computer before starting remote support.', true);
+    return;
+  }
+  const code = await supportCodeFromForm();
+  if (code == null) return;
+  try {
+    await store.db.rpc('admin_accept_support', { p_id: row.id, p_code: code || null });
+    if (!helpWaiting().filter(r => r.id !== row.id).length) ui.showHelp = false;
+    toast('Waiting for them to choose Allow. Nothing opens until they do.');
+    await loadOps();
+    paint(main);
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+async function declineHelp(main, id) {
+  const row = helpWaiting().find(r => String(r.id) === String(id));
+  if (!row) return;
+  let note = '';
+  const ok = await modal({
+    title: 'Decline remote help',
+    submit: 'Decline',
+    danger: true,
+    body: `<p style="margin:0">${esc(row.requested_by)} will not be connected.</p>
+      <label class="f">Reason they can be told<textarea name="note" required placeholder="Why this request is declined"></textarea></label>`,
+    onSubmit(form) {
+      note = form.note.value.trim();
+      if (note.length < 8) throw new Error('Write a reason of at least a few words.');
+    },
+  });
+  if (!ok) return;
+  try {
+    await store.db.rpc('admin_decline_support', { p_id: row.id, p_note: note });
+    if (!helpWaiting().filter(r => r.id !== row.id).length) ui.showHelp = false;
+    toast('Help request declined');
+    await loadOps();
+    paint(main);
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+async function askSupport(main, asset) {
+  if (current(asset).locked) throw new Error('Unlock the computer before starting remote support.');
+  const asked = helpWaiting().find(s => s.asset_id === asset.id);
+  const code = await supportCodeFromForm();
+  if (code == null) return;
+  try {
+    if (asked) await store.db.rpc('admin_accept_support', { p_id: asked.id, p_code: code || null });
+    else await store.db.rpc('admin_request_support', { p_asset_id: asset.id, p_code: code || null });
+    toast('Waiting for them to choose Allow. Nothing opens until they do.');
+    await loadOps();
+    paint(main);
+  }
 }
 
 async function askForAgentCode(asset) {

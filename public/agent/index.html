@@ -32,6 +32,7 @@
       <p>While someone is at the computer, it counts active minutes and which app is in front. Google, Bing, DuckDuckGo, Yahoo, and YouTube searches made after this starts are listed under Usage. Searches already in the browser are not imported. Page contents, documents, the screen, and the keyboard are not collected.</p>
       <p>From Control, IT can set the built-in Administrator password once. The computer applies it and the password is then deleted. It is not written to the agent log, and the account is not enabled by that change. IT can also queue an HTTPS installer that ends in .msi or .exe. The file is downloaded, run, and deleted. This is not a remote command prompt.</p>
       <p>IT can lock the computer from Control. Nobody can sign in again until IT unlocks it. Wi-Fi and Ethernet are kept on, including if someone turns them off, so the computer stays connected to the dashboard and can receive the unlock. The reason is shown before sign-in. The lock does not wipe the computer, and it does not capture the screen or the keyboard.</p>
+      <p>The person can choose Request remote help in the Mulk Agent window. IT sees that on the dashboard and can ask to connect. Quick Assist opens only after the person chooses Allow. Mulk stores only whether they allowed it. It does not save the screen, and it does not record the keyboard. This is not a hidden connection.</p>
     </div>
     <h2>Install on one computer</h2>
     <ol>
@@ -44,7 +45,7 @@
       <li>Leave the Mulk Agent window available. It also opens at the next sign-in.</li>
     </ol>
     <h2>Update an existing install</h2>
-    <p>Computers that already have Mulk Agent keep the copy they downloaded. To pick up health, the one-time password change, remote install, and the admin lock, run this in an Administrator PowerShell. It does not need a new code. Then close the Mulk Agent window and open it again.</p>
+    <p>Computers that already have Mulk Agent keep the copy they downloaded. To pick up health, the one-time password change, remote install, the admin lock, and remote help, run this in an Administrator PowerShell. It does not need a new code. Then close the Mulk Agent window and open it again.</p>
     <pre>powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest https://mulk-asset-manager.vercel.app/agent/MulkAgent.ps1 -OutFile C:\ProgramData\MulkAgent\MulkAgent.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Enforce"</pre>
     <h2>Remove it</h2>
     <p>Unlock the computer in Control first. If you remove Mulk Agent while it is locked, Windows sign-in stays blocked. Then, in an Administrator PowerShell:</p>

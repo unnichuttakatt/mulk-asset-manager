@@ -1,4 +1,4 @@
-import { esc, fmtDate, fmtDateTime } from '../ui.js';
+import { esc, fmtDate, fmtDateTime, modal, toast } from '../ui.js';
 import { store, loadAssets, countBy, STATUS, ACTION_LABEL } from '../data.js';
 
 const q = (o) => '#/assets?' + new URLSearchParams(o).toString();
@@ -42,6 +42,16 @@ export async function dashboardView(main) {
   try {
     locked = await store.db.select('laptop_controls', { select: 'asset_id,lock_reason', locked: 'eq.true', limit: '8' }) || [];
   } catch { locked = []; }
+  let help = [];
+  try {
+    help = await store.db.select('support_sessions', {
+      select: 'id,asset_id,status,requested_by,reason,detail,requested_at',
+      status: 'in.(requested,pending,asking)',
+      order: 'requested_at.desc',
+      limit: '12',
+    }) || [];
+  } catch { help = []; }
+  const helpLabel = { requested: 'Asked for help', pending: 'Waiting for them to allow', asking: 'Allow prompt is on their screen' };
   const quietCutoff = Date.now() - 24 * 3600 * 1000;
   const offline = devices.filter(d => !d.last_seen || new Date(d.last_seen).getTime() < quietCutoff);
   const by = Object.fromEntries(countBy(assets, 'status'));
@@ -62,6 +72,20 @@ export async function dashboardView(main) {
     <div class="page-head">
       <div><h1>Dashboard</h1><p>${assets.length} assets on record · ${active.length} active</p></div>
       <div class="row"><a class="btn" href="#/import">Import</a><a class="btn primary" href="#/assets/new">+ Add asset</a></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-h"><h2>Remote help</h2><a href="#/control">${help.filter(r => r.status === 'requested').length ? help.filter(r => r.status === 'requested').length + ' waiting' : 'Control'}</a></div>
+      ${help.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>
+        ${help.map(r => {
+          const asset = assets.find(a => a.id === r.asset_id);
+          return `<tr>
+            <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.requested_by || '')}${r.reason ? ' · ' + esc(r.reason) : ''}</div></td>
+            <td><span class="badge ${r.status === 'requested' ? 'st-under_repair' : 'st-checked_out'}">${esc(helpLabel[r.status] || r.status)}</span></td>
+            <td class="sub">${fmtDateTime(r.requested_at)}</td>
+            <td>${r.status === 'requested' ? `<div class="row"><button type="button" class="btn sm primary" data-help-connect="${esc(r.id)}">Connect</button><button type="button" class="btn sm danger" data-help-decline="${esc(r.id)}">Decline</button></div>` : ''}</td>
+          </tr>`;
+        }).join('')}
+      </tbody></table></div>` : '<div class="empty">Nobody is waiting. The person chooses Request remote help in the Mulk Agent window. Connect from here, and they must choose Allow before Quick Assist opens. The screen is not saved.</div>'}
     </div>
     <div class="kpis">
       ${kpi(null, 'Total assets')}
@@ -170,4 +194,56 @@ export async function dashboardView(main) {
       </tbody></table></div>` : '<div class="empty">No activity yet. <a href="#/import">Import your AssetTiger export</a> to get started.</div>'}
     </div>`;
   main.querySelectorAll('tr[data-href]').forEach(tr => tr.onclick = () => { location.hash = tr.dataset.href; });
+  main.querySelectorAll('[data-help-connect]').forEach(btn => {
+    btn.onclick = () => connectHelp(main, btn.dataset.helpConnect);
+  });
+  main.querySelectorAll('[data-help-decline]').forEach(btn => {
+    btn.onclick = () => declineHelp(main, btn.dataset.helpDecline);
+  });
+}
+
+async function connectHelp(main, id) {
+  let code = '';
+  const ok = await modal({
+    title: 'Ask them to allow',
+    submit: 'Ask to connect',
+    body: `<p style="margin:0">Nothing opens until the person chooses Allow on that computer. On your own PC, open Quick Assist and choose Help someone. Paste the code so their screen can show it after they allow.</p>
+      <label class="f">Quick Assist code, optional<input name="code" inputmode="numeric" maxlength="8" placeholder="6 digit code" autocomplete="off"></label>
+      <p class="muted" style="margin:8px 0 0">Leave this blank if you will read the code to them after they allow. The screen is not saved.</p>`,
+    onSubmit(form) {
+      code = form.code.value.trim();
+      if (code && !/^[0-9]{6,8}$/.test(code)) throw new Error('The Quick Assist code is 6 to 8 digits, or leave it blank.');
+    },
+  });
+  if (!ok) return;
+  try {
+    await store.db.rpc('admin_accept_support', { p_id: id, p_code: code || null });
+    toast('Waiting for them to choose Allow. Nothing opens until they do.');
+    await dashboardView(main);
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+async function declineHelp(main, id) {
+  let note = '';
+  const ok = await modal({
+    title: 'Decline remote help',
+    submit: 'Decline',
+    danger: true,
+    body: `<p style="margin:0">They will not be connected.</p>
+      <label class="f">Reason they can be told<textarea name="note" required placeholder="Why this request is declined"></textarea></label>`,
+    onSubmit(form) {
+      note = form.note.value.trim();
+      if (note.length < 8) throw new Error('Write a reason of at least a few words.');
+    },
+  });
+  if (!ok) return;
+  try {
+    await store.db.rpc('admin_decline_support', { p_id: id, p_note: note });
+    toast('Help request declined');
+    await dashboardView(main);
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
 }

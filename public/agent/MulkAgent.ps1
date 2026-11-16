@@ -4,6 +4,8 @@
 # web searches, active time, and which app is in front.
 # It does not record keystrokes, screenshots, documents, page contents, or GPS.
 # A lock blocks Windows sign-in until IT unlocks it. Wi-Fi and Ethernet stay on.
+# IT can ask to open Windows Quick Assist. The person must choose Allow first.
+# The screen is not saved, and the keyboard is not recorded.
 param(
   [switch]$Enforce,
   [switch]$Sample,
@@ -1132,9 +1134,72 @@ function Ensure-WatchTask {
   }
 }
 
-function Invoke-Watch {
+function Start-QuickAssist {
+  $qa = Join-Path $env:SystemRoot 'System32\quickassist.exe'
+  if (Test-Path $qa) { Start-Process -FilePath $qa | Out-Null }
+  else { Start-Process 'ms-quick-assist:' | Out-Null }
+}
+
+function Ask-RemoteApproval {
+  if ($script:supportPrompt) { return }
+  $config = Get-AgentConfig
   try {
-    $policy = Get-Policy (Get-AgentConfig)
+    $policy = Get-Policy $config
+    if ([bool]$policy.locked) { return }
+  } catch { return }
+  $job = Invoke-AgentRpc $config 'agent_take_support' @{ p_token = [string]$config.token }
+  if (-not $job -or -not $job.id) { return }
+  $code = [string]$job.assist_code
+  $script:supportPrompt = $true
+  $ok = $false
+  $detail = 'The person declined. Nothing was opened.'
+  try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+      "IT wants to connect to this computer with Windows Quick Assist.`r`n`r`nYou will see the Quick Assist window. The screen is not saved, and the keyboard is not recorded.`r`n`r`nAllow this connection?",
+      'Mulk Agent',
+      [System.Windows.Forms.MessageBoxButtons]::YesNo,
+      [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+      $detail = 'The person declined. Nothing was opened.'
+    } else {
+      if ($code) {
+        [System.Windows.Forms.MessageBox]::Show(
+          "Allowed. In the Quick Assist window, enter this code: $code`r`n`r`nThe screen is not saved.",
+          'Mulk Agent'
+        ) | Out-Null
+      }
+      Start-QuickAssist
+      $ok = $true
+      $detail = 'The person allowed it. Quick Assist opened. The screen is not saved.'
+    }
+  } catch {
+    $detail = [string]$_.Exception.Message
+    if ($code -and $detail.Contains($code)) { $detail = 'Remote support could not open.' }
+    if ($detail.Length -gt 240) { $detail = $detail.Substring(0, 240) }
+  } finally {
+    $code = ''
+    $script:supportPrompt = $false
+  }
+  Invoke-AgentRpc $config 'agent_finish_support' @{
+    p_token = [string]$config.token
+    p_job = [string]$job.id
+    p_ok = $ok
+    p_detail = $detail
+  }
+  if ($ok) { Write-AgentLog 'The person allowed remote support. Quick Assist opened. The screen is not saved and the keyboard is not recorded.' }
+  else { Write-AgentLog $detail }
+}
+
+function Invoke-Watch {
+  $config = $null
+  try { $config = Get-AgentConfig } catch {
+    Write-AgentLog ('Lock watch could not read this computer: ' + $_.Exception.Message)
+    return
+  }
+  try {
+    $policy = Get-Policy $config
     Sync-AssetLock $policy
   } catch {
     if (Test-Path $LockFlag) {
@@ -1202,6 +1267,7 @@ if ($Sample) {
     $samplePolicy = Get-Policy (Get-AgentConfig)
     if ([bool]$samplePolicy.locked) { & "$env:SystemRoot\System32\logoff.exe" }
   } catch { }
+  try { Ask-RemoteApproval } catch { Write-AgentLog ('Remote support failed: ' + $_.Exception.Message) }
   try { Add-ActivitySample } catch {
     Write-AgentLog ("Activity sample failed: " + $_.Exception.Message)
     exit 1
@@ -1218,8 +1284,8 @@ if (-not $mutex.WaitOne(0, $false)) { exit 0 }
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Mulk Agent'
 $form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(520, 800)
-$form.MinimumSize = New-Object System.Drawing.Size(480, 720)
+$form.Size = New-Object System.Drawing.Size(520, 860)
+$form.MinimumSize = New-Object System.Drawing.Size(480, 780)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 $form.BackColor = [System.Drawing.Color]::FromArgb(244, 245, 247)
 
@@ -1231,61 +1297,78 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock blocks sign-in until IT unlocks it. Wi-Fi and Ethernet stay on. It does not read files, capture the screen, record the keyboard, or use GPS.'
-$intro.Size = New-Object System.Drawing.Size(460, 112)
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock blocks sign-in until IT unlocks it. Wi-Fi and Ethernet stay on. If you ask for remote help, IT can connect only after you choose Allow. Quick Assist then opens on this screen. The screen is not saved. It does not read files, capture the screen, record the keyboard, or use GPS.'
+$intro.Size = New-Object System.Drawing.Size(460, 132)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
 
 $status = New-Object System.Windows.Forms.Label
-$status.Size = New-Object System.Drawing.Size(460, 96)
-$status.Location = New-Object System.Drawing.Point(20, 172)
+$status.Size = New-Object System.Drawing.Size(460, 88)
+$status.Location = New-Object System.Drawing.Point(20, 192)
 $form.Controls.Add($status)
 
 $rules = New-Object System.Windows.Forms.ListBox
-$rules.Size = New-Object System.Drawing.Size(460, 130)
-$rules.Location = New-Object System.Drawing.Point(20, 276)
+$rules.Size = New-Object System.Drawing.Size(460, 110)
+$rules.Location = New-Object System.Drawing.Point(20, 286)
 $form.Controls.Add($rules)
 
 $nameLabel = New-Object System.Windows.Forms.Label
 $nameLabel.Text = 'Your name'
-$nameLabel.Location = New-Object System.Drawing.Point(20, 418)
+$nameLabel.Location = New-Object System.Drawing.Point(20, 406)
 $nameLabel.AutoSize = $true
 $form.Controls.Add($nameLabel)
 
 $nameBox = New-Object System.Windows.Forms.TextBox
-$nameBox.Location = New-Object System.Drawing.Point(20, 440)
+$nameBox.Location = New-Object System.Drawing.Point(20, 428)
 $nameBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($nameBox)
 
 $reasonLabel = New-Object System.Windows.Forms.Label
 $reasonLabel.Text = 'Why you need admin rights'
-$reasonLabel.Location = New-Object System.Drawing.Point(20, 476)
+$reasonLabel.Location = New-Object System.Drawing.Point(20, 464)
 $reasonLabel.AutoSize = $true
 $form.Controls.Add($reasonLabel)
 
 $reasonBox = New-Object System.Windows.Forms.TextBox
-$reasonBox.Location = New-Object System.Drawing.Point(20, 498)
+$reasonBox.Location = New-Object System.Drawing.Point(20, 486)
 $reasonBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($reasonBox)
 
 $ask = New-Object System.Windows.Forms.Button
 $ask.Text = 'Request admin rights'
-$ask.Location = New-Object System.Drawing.Point(20, 538)
+$ask.Location = New-Object System.Drawing.Point(20, 522)
 $ask.Size = New-Object System.Drawing.Size(180, 34)
 $form.Controls.Add($ask)
 
 $refresh = New-Object System.Windows.Forms.Button
 $refresh.Text = 'Refresh'
-$refresh.Location = New-Object System.Drawing.Point(210, 538)
+$refresh.Location = New-Object System.Drawing.Point(210, 522)
 $refresh.Size = New-Object System.Drawing.Size(100, 34)
 $form.Controls.Add($refresh)
+
+$helpLabel = New-Object System.Windows.Forms.Label
+$helpLabel.Text = 'What do you need help with'
+$helpLabel.Location = New-Object System.Drawing.Point(20, 566)
+$helpLabel.AutoSize = $true
+$form.Controls.Add($helpLabel)
+
+$helpBox = New-Object System.Windows.Forms.TextBox
+$helpBox.Location = New-Object System.Drawing.Point(20, 588)
+$helpBox.Size = New-Object System.Drawing.Size(460, 28)
+$form.Controls.Add($helpBox)
+
+$help = New-Object System.Windows.Forms.Button
+$help.Text = 'Request remote help'
+$help.Location = New-Object System.Drawing.Point(20, 624)
+$help.Size = New-Object System.Drawing.Size(180, 34)
+$form.Controls.Add($help)
 
 $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Multiline = $true
 $logBox.ReadOnly = $true
 $logBox.ScrollBars = 'Vertical'
-$logBox.Location = New-Object System.Drawing.Point(20, 586)
-$logBox.Size = New-Object System.Drawing.Size(460, 80)
+$logBox.Location = New-Object System.Drawing.Point(20, 668)
+$logBox.Size = New-Object System.Drawing.Size(460, 72)
 $form.Controls.Add($logBox)
 
 function Update-LogView {
@@ -1354,16 +1437,37 @@ $ask.Add_Click({
 })
 
 $refresh.Add_Click({ Update-Window })
+$help.Add_Click({
+  try {
+    $who = $nameBox.Text.Trim()
+    $why = $helpBox.Text.Trim()
+    if ($who.Length -lt 2) { throw 'Enter your name.' }
+    if ($why.Length -lt 8) { throw 'Write what you need help with, at least a few words.' }
+    $config = Get-AgentConfig
+    Invoke-AgentRpc $config 'agent_request_support' @{ p_token = $config.token; p_requested_by = $who; p_reason = $why }
+    $helpBox.Text = ''
+    Write-AgentLog "Remote help requested for $who."
+    [System.Windows.Forms.MessageBox]::Show('Request sent. IT will see it on the dashboard. Nothing connects until you choose Allow.', 'Mulk Agent')
+    Update-LogView
+  } catch {
+    [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Mulk Agent')
+  }
+})
 $script:sessionLocked = $false
 $script:lockSigningOut = $false
+$script:supportPrompt = $false
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 60000
 $timer.Add_Tick({
   try { Add-ActivitySample } catch { }
+  try { Ask-RemoteApproval } catch { }
   Update-Window
 })
 $timer.Start()
-$form.Add_Shown({ Update-Window })
+$form.Add_Shown({
+  Update-Window
+  try { Ask-RemoteApproval } catch { }
+})
 [void]$form.ShowDialog()
 $timer.Stop()
 $mutex.ReleaseMutex() | Out-Null
