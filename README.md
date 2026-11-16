@@ -91,7 +91,8 @@ You can run the import again whenever you like while both systems are in use. Ex
 | Add a new purchase | **Add asset** → **Suggest** fills the next tag in your numbering pattern (e.g. `MH/LAP/2026/HZF/114`) |
 | Print stickers | Tick assets on the **Assets** page → **Print QR labels**, or use the **QR labels** page |
 | Add another IT admin | **Admins → Add admin**, then in Supabase: **Authentication → Users → Add user → Send invitation** |
-| Set admin rights, printer mode, or a hold | **Control**. Pick the asset. Computers can get a timed admin window. Printers get a queue mode. Mark a computer, printer, or phone enrolled only after the person has completed the visible enrollment |
+| Approve a request for admin rights | **Control**. When someone asks, a popup lists the person, the computer, and the reason. Approve 1 hour, 4 hours, or until 18:00 GST, or deny it. The request itself never grants admin rights |
+| See a blocked copy | **Control → Copy activity**. The row shows the channel, the file name, the label, and whether it was blocked, warned, or quarantined. The file itself is not stored |
 
 Status and assignment change only through the action buttons. That way every change appears in the history.
 

@@ -427,3 +427,51 @@ alter table public.laptop_controls add column if not exists print_mode text not 
 alter table public.laptop_controls drop constraint if exists laptop_controls_print_mode_check;
 alter table public.laptop_controls add constraint laptop_controls_print_mode_check
   check (print_mode in ('open','release','mono','stopped'));
+
+create table if not exists public.admin_requests (
+  id             bigint generated always as identity primary key,
+  asset_id       uuid not null references public.assets(id) on delete cascade,
+  requested_by   text not null,
+  reason         text not null,
+  status         text not null default 'pending' check (status in ('pending','approved','denied')),
+  window_choice  text,
+  decision_note  text,
+  decided_by     text,
+  created_at     timestamptz not null default now(),
+  decided_at     timestamptz,
+  constraint admin_requests_reason_len check (char_length(reason) between 8 and 500),
+  constraint admin_requests_window_check check (window_choice is null or window_choice in ('1h','4h','close'))
+);
+
+create index if not exists admin_requests_status_idx on public.admin_requests (status, created_at desc);
+
+create table if not exists public.copy_activity (
+  id           bigint generated always as identity primary key,
+  asset_id     uuid not null references public.assets(id) on delete cascade,
+  channel      text not null check (channel in ('usb','clipboard','cloud','mail','print')),
+  file_name    text not null,
+  label        text,
+  action       text not null check (action in ('blocked','warned','quarantined')),
+  happened_at  timestamptz not null default now(),
+  reported_by  text not null default public.current_email(),
+  constraint copy_activity_name_len check (char_length(file_name) between 1 and 180),
+  constraint copy_activity_label_len check (label is null or char_length(label) <= 80)
+);
+
+create index if not exists copy_activity_when_idx on public.copy_activity (happened_at desc);
+
+alter table public.admin_requests enable row level security;
+alter table public.copy_activity enable row level security;
+
+drop policy if exists admins_all on public.admin_requests;
+create policy admins_all on public.admin_requests
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists admins_all on public.copy_activity;
+create policy admins_all on public.copy_activity
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
+revoke all on public.admin_requests, public.copy_activity from anon;
+grant select, insert, update, delete on public.admin_requests, public.copy_activity to authenticated;
+grant usage, select on sequence public.admin_requests_id_seq to authenticated;
+grant usage, select on sequence public.copy_activity_id_seq to authenticated;

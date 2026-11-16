@@ -88,15 +88,58 @@ alter table public.laptop_controls drop constraint if exists laptop_controls_con
 alter table public.laptop_controls add constraint laptop_controls_connection_check check (connection in ('not_connected','enrolled'));
 alter table public.laptop_controls add column if not exists print_mode text not null default 'open';
 alter table public.laptop_controls drop constraint if exists laptop_controls_print_mode_check;
-alter table public.laptop_controls add constraint laptop_controls_print_mode_check check (print_mode in ('open','release','mono','stopped'));`;
+alter table public.laptop_controls add constraint laptop_controls_print_mode_check check (print_mode in ('open','release','mono','stopped'));
+create table if not exists public.admin_requests (
+  id bigint generated always as identity primary key,
+  asset_id uuid not null references public.assets(id) on delete cascade,
+  requested_by text not null,
+  reason text not null,
+  status text not null default 'pending' check (status in ('pending','approved','denied')),
+  window_choice text,
+  decision_note text,
+  decided_by text,
+  created_at timestamptz not null default now(),
+  decided_at timestamptz,
+  constraint admin_requests_reason_len check (char_length(reason) between 8 and 500),
+  constraint admin_requests_window_check check (window_choice is null or window_choice in ('1h','4h','close'))
+);
+create table if not exists public.copy_activity (
+  id bigint generated always as identity primary key,
+  asset_id uuid not null references public.assets(id) on delete cascade,
+  channel text not null check (channel in ('usb','clipboard','cloud','mail','print')),
+  file_name text not null,
+  label text,
+  action text not null check (action in ('blocked','warned','quarantined')),
+  happened_at timestamptz not null default now(),
+  reported_by text not null default public.current_email(),
+  constraint copy_activity_name_len check (char_length(file_name) between 1 and 180),
+  constraint copy_activity_label_len check (label is null or char_length(label) <= 80)
+);
+alter table public.admin_requests enable row level security;
+alter table public.copy_activity enable row level security;
+drop policy if exists admins_all on public.admin_requests;
+create policy admins_all on public.admin_requests for all to authenticated using (public.is_admin()) with check (public.is_admin());
+drop policy if exists admins_all on public.copy_activity;
+create policy admins_all on public.copy_activity for all to authenticated using (public.is_admin()) with check (public.is_admin());
+revoke all on public.admin_requests, public.copy_activity from anon;
+grant select, insert, update, delete on public.admin_requests, public.copy_activity to authenticated;
+grant usage, select on sequence public.admin_requests_id_seq to authenticated;
+grant usage, select on sequence public.copy_activity_id_seq to authenticated;`;
 
 const BASE_COLS = 'asset_id,admin,elevation_ends_at,admin_note,policy,hold,hold_reason,updated_at,updated_by';
 const WIDE_COLS = BASE_COLS + ',connection,print_mode';
+
+const CHANNELS = { usb: 'USB copy', clipboard: 'Clipboard', cloud: 'Personal cloud', mail: 'Outside email', print: 'Print' };
+const COPY_ACTIONS = { blocked: 'Blocked', warned: 'Warned', quarantined: 'Quarantined' };
 
 const ui = {
   q: '',
   kind: 'all',
   selected: null,
+  showPopup: false,
+  queueReady: true,
+  requests: [],
+  activity: [],
   source: 'db',
   wide: true,
   controls: new Map(),
@@ -316,17 +359,108 @@ function connectionText(asset, c) {
   return c.connection === 'enrolled' ? 'Enrolled' : 'Not enrolled';
 }
 
+function pending() {
+  return ui.requests.filter(r => r.status === 'pending');
+}
+
+function assetTag(id) {
+  return ui.assets.find(a => a.id === id);
+}
+
+async function loadQueues() {
+  if (ui.source !== 'db') {
+    const local = readLocal();
+    ui.requests = local.requests || [];
+    ui.activity = local.activity || [];
+    ui.queueReady = true;
+    return;
+  }
+  try {
+    const [requests, activity] = await Promise.all([
+      store.db.select('admin_requests', { select: 'id,asset_id,requested_by,reason,status,window_choice,decision_note,created_at,decided_at', order: 'created_at.desc', limit: '40' }),
+      store.db.select('copy_activity', { select: 'id,asset_id,channel,file_name,label,action,happened_at', order: 'happened_at.desc', limit: '40' }),
+    ]);
+    ui.requests = requests || [];
+    ui.activity = activity || [];
+    ui.queueReady = true;
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+    const local = readLocal();
+    ui.requests = local.requests || [];
+    ui.activity = local.activity || [];
+    ui.queueReady = false;
+  }
+}
+
+function writeLocalQueues() {
+  const local = readLocal();
+  local.requests = ui.requests;
+  local.activity = ui.activity;
+  localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
+}
+
+async function createRequest(asset, requestedBy, reason) {
+  if (ui.source === 'db' && ui.queueReady) {
+    const saved = await store.db.insert('admin_requests', { asset_id: asset.id, requested_by: requestedBy, reason, status: 'pending' });
+    ui.requests.unshift(saved[0]);
+  } else {
+    ui.requests.unshift({ id: 'local-' + Date.now(), asset_id: asset.id, requested_by: requestedBy, reason, status: 'pending', created_at: new Date().toISOString() });
+    writeLocalQueues();
+  }
+  ui.showPopup = true;
+}
+
+async function decideRequest(req, status, extra) {
+  const patch = { status, decided_at: new Date().toISOString(), window_choice: extra.window_choice || null, decision_note: extra.decision_note || null };
+  if (ui.source === 'db' && ui.queueReady && !String(req.id).startsWith('local')) {
+    const saved = await store.db.update('admin_requests', { id: `eq.${req.id}`, status: 'eq.pending' }, { ...patch, decided_by: who() });
+    if (!saved?.length) throw new Error('That request was already decided.');
+  }
+  ui.requests = ui.requests.map(r => r.id === req.id ? { ...r, ...patch, decided_by: who() } : r);
+  if (!(ui.source === 'db' && ui.queueReady)) writeLocalQueues();
+}
+
+async function recordCopy(asset, row) {
+  const body = { asset_id: asset.id, channel: row.channel, file_name: row.file_name, label: row.label || null, action: row.action };
+  if (ui.source === 'db' && ui.queueReady) {
+    const saved = await store.db.insert('copy_activity', body);
+    ui.activity.unshift(saved[0]);
+  } else {
+    ui.activity.unshift({ ...body, id: 'local-' + Date.now(), happened_at: new Date().toISOString(), reported_by: who() });
+    writeLocalQueues();
+  }
+}
+
+let pollTimer = 0;
+let pollGen = 0;
+function watchRequests(main) {
+  clearInterval(pollTimer);
+  const gen = ++pollGen;
+  pollTimer = setInterval(async () => {
+    if (gen !== pollGen || !main.querySelector('#control-live') || document.querySelector('.modal-bg')) return;
+    const seen = new Set(pending().map(r => String(r.id)));
+    try { await loadQueues(); } catch { return; }
+    if (pending().some(r => !seen.has(String(r.id)))) {
+      ui.showPopup = true;
+      paint(main);
+    }
+  }, 15000);
+}
+
 export async function controlView(main) {
   main.innerHTML = `<div class="boot">Loading assets…</div>`;
   try {
     const assets = await loadAssets();
     ui.assets = assets.filter(a => a.status !== 'disposed').sort((a, b) => (a.tag || '').localeCompare(b.tag || ''));
     await loadControls();
+    await loadQueues();
+    if (pending().length) ui.showPopup = true;
   } catch (err) {
     main.innerHTML = `<div class="page-head"><div><h1>Control</h1></div></div><div class="err">${esc(err.message || String(err))}</div>`;
     return;
   }
   paint(main);
+  watchRequests(main);
 }
 
 function paint(main) {
@@ -348,9 +482,10 @@ function paint(main) {
   main.innerHTML = `
     <div class="page-head">
       <div>
-        <h1>Control</h1>
+        <h1 id="control-live">Control</h1>
         <p>${ui.assets.length} active asset${ui.assets.length === 1 ? '' : 's'} from the register. One list for laptops, desktops, printers, phones, and everything else.</p>
       </div>
+      <button type="button" class="btn ${pending().length ? 'primary' : ''}" id="open-requests">Admin requests (${pending().length})</button>
     </div>
     <div class="note" style="margin-bottom:16px">
       <strong>How a device gets connected.</strong>
@@ -363,12 +498,17 @@ function paint(main) {
     ${ui.source === 'local' ? `
       <div class="err" style="margin-bottom:16px">
         <strong>Shared storage is not set up yet.</strong> Decisions stay in this browser until you run <span class="mono">supabase/laptop-control.sql</span> once in the Supabase SQL editor.
-        <div class="row" style="margin-top:8px"><button type="button" class="btn sm" id="copy-sql">Copy the SQL</button></div>
+        <div class="row" style="margin-top:8px"><button type="button" class="btn sm" data-copy-sql>Copy the SQL</button></div>
+      </div>` : ''}
+    ${ui.source === 'db' && !ui.queueReady ? `
+      <div class="err" style="margin-bottom:16px">
+        <strong>Admin requests are not shared yet.</strong> Run <span class="mono">supabase/laptop-control.sql</span> again so a request pops up for every admin, not only in this browser.
+        <div class="row" style="margin-top:8px"><button type="button" class="btn sm" data-copy-sql>Copy the SQL</button></div>
       </div>` : ''}
     ${ui.source === 'db' && !ui.wide ? `
       <div class="err" style="margin-bottom:16px">
         <strong>Connection and printer settings are not stored for every admin yet.</strong> Run <span class="mono">supabase/laptop-control.sql</span> again so the new columns are added. Until then, those two fields stay in this browser.
-        <div class="row" style="margin-top:8px"><button type="button" class="btn sm" id="copy-sql">Copy the SQL</button></div>
+        <div class="row" style="margin-top:8px"><button type="button" class="btn sm" data-copy-sql>Copy the SQL</button></div>
       </div>` : ''}
     <div class="kpis">
       <div class="card kpi"><div class="k-label">Assets</div><div class="k-val">${ui.assets.length}</div></div>
@@ -418,7 +558,23 @@ function paint(main) {
           </tr>`;
         }).join('')}
       </tbody></table></div>` : '<div class="empty">No control decisions yet.</div>'}
-    </div>`;
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-h"><h2>Copy activity</h2><span class="muted">File name and result only</span></div>
+      ${ui.activity.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Asset</th><th>Channel</th><th>File</th><th>Result</th></tr></thead><tbody>
+        ${ui.activity.slice(0, 20).map(e => {
+          const a = assetTag(e.asset_id);
+          return `<tr>
+            <td>${fmtDateTime(e.happened_at)}</td>
+            <td>${a ? `<span class="tag">${esc(a.tag)}</span>` : '<span class="muted">Removed asset</span>'}</td>
+            <td>${esc(CHANNELS[e.channel] || e.channel)}</td>
+            <td>${esc(e.file_name)}${e.label ? `<div class="sub">${esc(e.label)}</div>` : ''}</td>
+            <td><span class="badge ${e.action === 'blocked' || e.action === 'quarantined' ? 'st-broken' : 'st-under_repair'}">${esc(COPY_ACTIONS[e.action] || e.action)}</span></td>
+          </tr>`;
+        }).join('')}
+      </tbody></table></div>` : '<div class="empty">No copy activity yet. After a computer is enrolled, the company agent reports a USB, clipboard, cloud, email, or print attempt by file name and result. The file itself is not sent here.</div>'}
+    </div>
+    ${ui.showPopup ? requestPopup() : ''}`;
 
   const qEl = document.getElementById('cq');
   let timer;
@@ -430,13 +586,24 @@ function paint(main) {
   main.querySelectorAll('tr[data-id]').forEach(tr => {
     tr.onclick = () => { ui.selected = tr.dataset.id; paint(main); };
   });
-  document.getElementById('copy-sql')?.addEventListener('click', async () => {
+  main.querySelectorAll('[data-copy-sql]').forEach(btn => btn.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(SETUP_SQL);
       toast('SQL copied. Paste it in the Supabase SQL editor and run it.');
     } catch {
       toast('Could not copy. Open supabase/laptop-control.sql in the project.', true);
     }
+  }));
+  document.getElementById('open-requests').onclick = () => { ui.showPopup = true; paint(main); };
+  document.getElementById('close-requests')?.addEventListener('click', () => { ui.showPopup = false; paint(main); });
+  document.getElementById('request-pop')?.addEventListener('mousedown', (e) => {
+    if (e.target.id === 'request-pop') { ui.showPopup = false; paint(main); }
+  });
+  main.querySelectorAll('[data-approve]').forEach(btn => {
+    btn.onclick = () => approveRequest(main, btn.dataset.approve, btn.dataset.window);
+  });
+  main.querySelectorAll('[data-deny]').forEach(btn => {
+    btn.onclick = () => denyRequest(main, btn.dataset.deny);
   });
   if (selected) bindDetail(main, selected);
   if (focusId === 'cq' || focusId === 'f-kind') {
@@ -516,6 +683,11 @@ function detail(a) {
           <button type="button" class="btn sm" data-act="4h">Grant 4 hours</button>
           <button type="button" class="btn sm" data-act="close">Until 18:00 GST</button>
           <button type="button" class="btn sm" data-act="standing">Standing admin</button>
+          <button type="button" class="btn sm primary" data-act="request">User is requesting admin</button>
+        </div>
+        <p class="muted" style="margin:10px 0 0">A request opens a popup on this dashboard. Approving it grants a short window. The request alone does not.</p>
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn sm" data-act="copy">Record a copy event</button>
         </div>
       </div>
       <div>
@@ -609,10 +781,131 @@ async function act(main, asset, kind) {
       await save(main, asset, { ...current(asset), hold: true, hold_reason: reason }, 'hold', `Placed on hold: ${reason}`);
     } else if (kind === 'release') {
       await save(main, asset, { ...c, hold: false, hold_reason: null }, 'hold', 'Hold released');
+    } else if (kind === 'request') {
+      await askForAdmin(main, asset);
+    } else if (kind === 'copy') {
+      await askForCopy(main, asset);
     }
   } catch (err) {
     toast(err.message || String(err), true);
   }
+}
+
+function requestPopup() {
+  const rows = pending();
+  return `<div class="modal-bg" id="request-pop">
+    <div class="pop-card">
+      <div class="card-h"><h2>Admin request${rows.length === 1 ? '' : 's'}</h2><button type="button" class="btn ghost icon-btn" id="close-requests" aria-label="Close">✕</button></div>
+      <div class="card-b">
+        ${rows.length ? rows.map(r => {
+          const a = assetTag(r.asset_id);
+          return `<div class="req">
+            <div><strong>${esc(r.requested_by)}</strong> · ${a ? `<span class="tag">${esc(a.tag)}</span> ${esc(a.description || '')}` : 'Asset not in the active list'}</div>
+            <p style="margin:6px 0">${esc(r.reason)}</p>
+            <div class="sub">${fmtDateTime(r.created_at)}</div>
+            <div class="row" style="margin-top:8px">
+              <button type="button" class="btn sm primary" data-approve="${esc(r.id)}" data-window="1h">Approve 1 hour</button>
+              <button type="button" class="btn sm primary" data-approve="${esc(r.id)}" data-window="4h">Approve 4 hours</button>
+              <button type="button" class="btn sm primary" data-approve="${esc(r.id)}" data-window="close">Until 18:00 GST</button>
+              <button type="button" class="btn sm danger" data-deny="${esc(r.id)}">Deny</button>
+            </div>
+          </div>`;
+        }).join('') : '<p class="muted" style="margin:0">No one is waiting. A request appears here when someone asks for admin rights on a company computer.</p>'}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function approveRequest(main, id, windowChoice) {
+  const req = ui.requests.find(r => String(r.id) === String(id) && r.status === 'pending');
+  if (!req) return;
+  const asset = assetTag(req.asset_id);
+  if (!asset) { toast('That asset is not in the active register.', true); return; }
+  try {
+    const c = current(asset);
+    const hours = windowChoice === '1h' ? 1 : windowChoice === '4h' ? 4 : 0;
+    const ends = hours ? new Date(Date.now() + hours * 3600000).toISOString() : untilGstClose();
+    const detail = hours
+      ? `Approved ${req.requested_by} for ${hours} hour${hours === 1 ? '' : 's'}, until ${fmtDateTime(ends)}`
+      : `Approved ${req.requested_by} until 18:00 GST (${fmtDateTime(ends)})`;
+    await persist(asset, { ...c, admin: 'elevated', elevation_ends_at: ends, admin_note: null }, 'admin', detail);
+    await decideRequest(req, 'approved', { window_choice: windowChoice });
+    if (!pending().length) ui.showPopup = false;
+    toast('Temporary admin granted');
+    paint(main);
+  } catch (err) { toast(err.message || String(err), true); }
+}
+
+async function denyRequest(main, id) {
+  const req = ui.requests.find(r => String(r.id) === String(id) && r.status === 'pending');
+  if (!req) return;
+  let reason = '';
+  const ok = await modal({
+    title: 'Deny admin request',
+    submit: 'Deny',
+    danger: true,
+    body: `<p style="margin:0">${esc(req.requested_by)} stays a standard user.</p>
+      <label class="f">Reason they can be told<textarea name="reason" required placeholder="Why this request is refused"></textarea></label>`,
+    onSubmit(form) {
+      reason = form.reason.value.trim();
+      if (reason.length < 8) throw new Error('Write a reason of at least a few words.');
+    },
+  });
+  if (!ok) return;
+  try {
+    await decideRequest(req, 'denied', { decision_note: reason });
+    if (!pending().length) ui.showPopup = false;
+    toast('Request denied');
+    paint(main);
+  } catch (err) { toast(err.message || String(err), true); }
+}
+
+async function askForAdmin(main, asset) {
+  let person = asset.assigned_to || '';
+  let reason = '';
+  const ok = await modal({
+    title: 'Admin request',
+    submit: 'Send to dashboard',
+    body: `<p style="margin:0">This records the person's request. It does not grant admin rights.</p>
+      <label class="f">Person<input name="person" required value="${esc(person)}"></label>
+      <label class="f">Why they need it<textarea name="reason" required placeholder="What they need to install or change"></textarea></label>`,
+    onSubmit(form) {
+      person = form.person.value.trim();
+      reason = form.reason.value.trim();
+      if (person.length < 2) throw new Error('Name the person who is asking.');
+      if (reason.length < 8 || reason.length > 500) throw new Error('Write a reason between a sentence and a short paragraph.');
+    },
+  });
+  if (!ok) return;
+  await createRequest(asset, person, reason);
+  toast('Request is on the dashboard');
+  paint(main);
+}
+
+async function askForCopy(main, asset) {
+  const channelOptions = Object.entries(CHANNELS).map(([k, label]) => `<option value="${k}">${esc(label)}</option>`).join('');
+  const actionOptions = Object.entries(COPY_ACTIONS).map(([k, label]) => `<option value="${k}">${esc(label)}</option>`).join('');
+  let row = null;
+  const ok = await modal({
+    title: 'Copy activity',
+    submit: 'Record',
+    body: `<p style="margin:0">Record the channel, the file name, and the result. Do not paste the file.</p>
+      <label class="f">Channel<select name="channel">${channelOptions}</select></label>
+      <label class="f">File name<input name="file_name" required maxlength="180" placeholder="Q3-payroll.xlsx"></label>
+      <label class="f">Label, if it has one<input name="label" maxlength="80" placeholder="Finance"></label>
+      <label class="f">Result<select name="action">${actionOptions}</select></label>`,
+    onSubmit(form) {
+      const file_name = form.file_name.value.trim();
+      const label = form.label.value.trim();
+      if (file_name.length < 1 || file_name.length > 180) throw new Error('Use the file name only, up to 180 characters.');
+      if (label.length > 80) throw new Error('Keep the label short.');
+      row = { channel: form.channel.value, file_name, label, action: form.action.value };
+    },
+  });
+  if (!ok || !row) return;
+  await recordCopy(asset, row);
+  toast('Copy activity recorded');
+  paint(main);
 }
 
 async function save(main, asset, next, action, detail) {
