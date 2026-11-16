@@ -94,9 +94,16 @@ export function createClient(url, anonKey) {
       try {
         const part = session?.access_token?.split('.')[1];
         if (!part) return 'aal1';
-        const json = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+        const padded = part.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - part.length % 4) % 4);
+        const json = JSON.parse(atob(padded));
         return json.aal || 'aal1';
       } catch { return 'aal1'; }
+    },
+    async verifiedTotpId() {
+      const factors = await this.listFactors();
+      const list = [...(factors?.totp || []), ...(factors?.all || [])];
+      const verified = list.find(f => f.status === 'verified' && (!f.factor_type || f.factor_type === 'totp'));
+      return verified?.id || null;
     },
     async signIn(email, password) {
       const s = await authFetch('/token?grant_type=password', { method: 'POST', body: JSON.stringify({ email, password }) });

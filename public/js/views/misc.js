@@ -252,7 +252,7 @@ export async function settingsView(main) {
     </div>
     <div class="card" style="margin-bottom:18px"><div class="card-h"><h2>Install password</h2></div>
       <div class="card-b stack">
-        <p class="muted" style="margin:0">Bulk install asks for this password as well as the authenticator code. It is not your sign-in password. It is stored as a hash, and it is not shown again.</p>
+        <p class="muted" style="margin:0">Bulk install asks for this password. It is not your sign-in password. It is stored as a hash, and it is not shown again.</p>
         <div class="row"><button class="btn" id="installpw">${icon('edit')} ${hasInstallPassword ? 'Change install password' : 'Set install password'}</button></div>
       </div>
     </div>

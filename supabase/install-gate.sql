@@ -1,5 +1,5 @@
 -- Remote sign-in lock is turned off. A single-computer install is turned off.
--- Bulk install stays, and it requires an authenticator sign-in plus the install password.
+-- Bulk install stays, and it requires the install password. Sign-in uses the admin password.
 
 update public.laptop_controls
 set locked = false, lock_reason = null
@@ -62,9 +62,6 @@ begin
   if not public.is_admin() then
     raise exception 'Not authorised';
   end if;
-  if coalesce(auth.jwt() ->> 'aal', '') <> 'aal2' then
-    raise exception 'Sign in with the authenticator code before setting the install password.';
-  end if;
   if p_password is null or char_length(p_password) < 12 or char_length(p_password) > 64 then
     raise exception 'Use 12 to 64 characters.';
   end if;
@@ -119,9 +116,6 @@ declare
 begin
   if not public.is_admin() then
     raise exception 'Not authorised';
-  end if;
-  if coalesce(auth.jwt() ->> 'aal', '') <> 'aal2' then
-    raise exception 'Sign in with the authenticator code before installing software.';
   end if;
   if p_asset_ids is null or cardinality(p_asset_ids) < 1 or cardinality(p_asset_ids) > 200 then
     raise exception 'Choose between 1 and 200 computers.';

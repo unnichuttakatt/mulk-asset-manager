@@ -917,7 +917,7 @@ function detail(a) {
       </div>
       <div>
         <h2 style="margin-bottom:8px">Install jobs</h2>
-        <p class="muted" style="margin:0">Software is sent from Bulk install, for several computers at once. That asks for the authenticator and the install password. This computer downloads the file, runs it, and deletes it.</p>
+        <p class="muted" style="margin:0">Software is sent from Bulk install, for several computers at once. That asks for the install password. This computer downloads the file, runs it, and deletes it.</p>
         ${jobsNote(a)}
       </div>
       <div>
@@ -1284,10 +1284,6 @@ async function askBulkInstall(main) {
     toast('Install Mulk Agent on a computer before sending software.', true);
     return;
   }
-  if (store.db.assurance() !== 'aal2') {
-    toast('Sign out and sign in with the authenticator code before installing software.', true);
-    return;
-  }
   let name = '';
   let url = '';
   let args = '';
@@ -1296,7 +1292,7 @@ async function askBulkInstall(main) {
   const ok = await modal({
     title: 'Bulk install',
     submit: 'Queue on selected computers',
-    body: `<p style="margin:0">The same HTTPS installer is queued for every ticked computer. Each one downloads it, runs it, and deletes the file. This needs the authenticator sign-in and the install password from Admins.</p>
+    body: `<p style="margin:0">The same HTTPS installer is queued for every ticked computer. Each one downloads it, runs it, and deletes the file. This asks for the install password from Admins.</p>
       <label class="f">Name<input name="name" required placeholder="Google Chrome"></label>
       <label class="f">Installer link<input name="url" required placeholder="https://example.com/setup.msi"></label>
       <label class="f">Silent arguments, optional<input name="args" placeholder="/S"></label>

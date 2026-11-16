@@ -206,65 +206,6 @@ async function route() {
 }
 
 let routed = false;
-function mfaDisabled(error) {
-  const text = String(error?.message || error || '');
-  return /enroll is disabled|verification is disabled|mfa is disabled|not enabled/i.test(text);
-}
-
-async function mfaScreen() {
-  let factors;
-  try { factors = await store.db.listFactors(); }
-  catch (ex) {
-    if (mfaDisabled(ex)) return start(true);
-    return loginScreen(ex.message || 'The authenticator could not be checked.');
-  }
-  const verified = (factors?.totp || []).find(f => f.status === 'verified');
-  if (verified) return mfaCode(verified.id, false);
-  for (const factor of factors?.totp || []) {
-    try { await store.db.deleteFactor(factor.id); } catch { /* an unfinished code can be replaced */ }
-  }
-  let enrolled;
-  try { enrolled = await store.db.enrollTotp(); }
-  catch (ex) {
-    if (mfaDisabled(ex)) return start(true);
-    return loginScreen(ex.message || 'The authenticator could not be set up.');
-  }
-  const qr = enrolled?.totp?.qr_code || '';
-  const secret = enrolled?.totp?.secret || '';
-  app.innerHTML = `
-    <div class="login">
-      <form class="card" id="mfa-enroll">
-        <div class="card-b">
-          ${brand()}
-          <div><h1>Set up the authenticator</h1>
-          <p class="muted" style="margin:4px 0 0">Scan this with an authenticator app, then type the 6 digit code. Sign-in after this asks for that code.</p></div>
-          <img id="mfa-qr" alt="Authenticator QR code" width="180" height="180" hidden style="background:#fff;padding:8px;border-radius:8px">
-          <p class="muted" style="margin:0">If you cannot scan it, type this key: <span class="mono">${esc(secret)}</span></p>
-          <label class="f">6 digit code<input name="code" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9]{6}"></label>
-          <div class="err" hidden></div>
-          <button class="btn primary" style="justify-content:center">Confirm authenticator</button>
-          <button type="button" class="btn ghost" id="mfa-out" style="justify-content:center">Sign out</button>
-        </div>
-      </form>
-    </div>`;
-  const qrImg = $('#mfa-qr');
-  if (qr && qrImg) { qrImg.src = qr; qrImg.hidden = false; }
-  const form = $('#mfa-enroll');
-  const err = $('.err', form);
-  $('#mfa-out').onclick = async () => { await store.db.signOut(); loginScreen(); };
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    err.hidden = true;
-    try {
-      await store.db.verifyFactor(enrolled.id, form.code.value.trim());
-      await start();
-    } catch (ex) {
-      err.textContent = ex.message || 'That code was not accepted.';
-      err.hidden = false;
-    }
-  };
-}
-
 function mfaCode(factorId) {
   app.innerHTML = `
     <div class="login">
@@ -299,9 +240,14 @@ function mfaCode(factorId) {
   };
 }
 
-async function start(skipMfa = false) {
-  if (!skipMfa && store.db.assurance() !== 'aal2') return mfaScreen();
+async function start() {
   ctx.user = store.db.session?.user || null;
+  if (store.db.assurance() !== 'aal2') {
+    try {
+      const factorId = await store.db.verifiedTotpId();
+      if (factorId) return mfaCode(factorId);
+    } catch { /* the password sign-in still opens the app */ }
+  }
   let ok = false;
   try { ok = await store.db.rpc('is_admin'); }
   catch (e) { if (e.status === 401) { await store.db.signOut(); return loginScreen('Please sign in again.'); } throw e; }
