@@ -5,7 +5,7 @@ import { dashboardView } from './views/dashboard.js';
 import { assetsView } from './views/assets.js';
 import { assetView, assetFormView } from './views/asset.js';
 import { importView } from './views/import.js';
-import { activityView, reportsView, labelsView, settingsView } from './views/misc.js';
+import { activityView, reportsView, labelsView, settingsView, changePasswordDialog } from './views/misc.js';
 import { controlView } from './views/control.js';
 
 const app = document.getElementById('app');
@@ -153,13 +153,16 @@ function renderShell() {
       <aside class="side">
         ${brand()}
         <nav class="nav">${NAV.map(([p, l, i]) => `<a href="#${p}" data-path="${p}">${icon(i)}<span>${l}</span></a>`).join('')}</nav>
-        <div class="foot">${esc(ctx.user?.email || '')}<br><button class="btn sm" id="signout">${icon('out')} Sign out</button></div>
+        <div class="foot">${esc(ctx.user?.email || '')}<br>
+          <button class="btn sm" id="changepw" type="button">${icon('edit')} Change password</button>
+          <button class="btn sm" id="signout" type="button">${icon('out')} Sign out</button></div>
       </aside>
       <div>
         <div class="topbar"><button class="btn icon-btn" id="menu" aria-label="Menu">${icon('menu')}</button><span>IT Assets</span></div>
         <main class="main" id="main"></main>
       </div>
     </div>`;
+  $('#changepw').onclick = () => changePasswordDialog();
   $('#signout').onclick = async () => { await store.db.signOut(); invalidate(); loginScreen('You have been signed out.'); };
   $('#menu').onclick = () => $('.shell').classList.toggle('menu-open');
 }
