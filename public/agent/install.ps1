@@ -96,6 +96,8 @@ foreach ($linkPath in @($startup, $menu)) {
 
 $task = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Enforce'
 schtasks.exe /Create /TN 'Mulk Agent Enforce' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR $task /F | Out-Null
+$sample = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Sample'
+schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 1 /RU $WindowsUser /IT /RL LIMITED /TR $sample /F | Out-Null
 
 Write-Host "Mulk Agent installed for $($result.tag)."
 Write-Host 'The Mulk Agent window opens at sign-in. IT approves admin requests in Control.'

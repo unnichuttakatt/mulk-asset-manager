@@ -59,6 +59,8 @@ export async function assetView(main, params, id) {
   ]);
   let programs = [];
   let devices = [];
+  let usageDays = [];
+  let searches = [];
   try {
     devices = await store.db.select('agent_devices', {
       asset_id: 'eq.' + id,
@@ -67,6 +69,12 @@ export async function assetView(main, params, id) {
       limit: '3',
     }) || [];
   } catch { devices = []; }
+  try {
+    [usageDays, searches] = await Promise.all([
+      store.db.select('device_days', { asset_id: 'eq.' + id, select: 'activity_date,active_seconds', order: 'activity_date.desc', limit: '7' }),
+      store.db.select('web_searches', { asset_id: 'eq.' + id, select: 'query,engine,searched_at', order: 'searched_at.desc', limit: '8' }),
+    ]);
+  } catch { usageDays = []; searches = []; }
   try {
     programs = await store.db.select('installed_software', {
       asset_id: 'eq.' + id,
@@ -81,6 +89,12 @@ export async function assetView(main, params, id) {
   loadAssets().catch(() => {});   // for suggestions in action forms
 
   const acts = ACTIONS_FOR[a.status] || ['note'];
+  const span = (seconds) => {
+    const s = Math.max(0, Number(seconds) || 0);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return h ? `${h}h ${m}m` : `${m}m`;
+  };
   main.innerHTML = `
     <div class="page-head">
       <div>
@@ -133,6 +147,15 @@ export async function assetView(main, params, id) {
         <div class="muted" style="font-size:12.5px">Scan with a phone camera to open this page.</div>
         <button class="btn" id="label">${icon('print')} Print label</button>
       </div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-h"><h2>Usage</h2><a href="#/usage?asset=${esc(a.id)}">Open usage</a></div>
+      ${usageDays.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Day</th><th>Active</th></tr></thead><tbody>
+        ${usageDays.map(d => `<tr><td>${esc(d.activity_date)}</td><td>${span(d.active_seconds)}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">No active time yet.</div>'}
+      ${searches.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Engine</th><th>Search</th></tr></thead><tbody>
+        ${searches.map(s => `<tr><td>${fmtDateTime(s.searched_at)}</td><td>${esc(s.engine)}</td><td>${esc(s.query)}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">No searches recorded yet. Only searches made after Mulk Agent starts watching are kept.</div>'}
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-h"><h2>Network location</h2><a href="#/alerts">Alerts</a></div>

@@ -1,9 +1,11 @@
 # Mulk Agent. A visible company program for one Windows computer.
 # It shows the rules, sends an admin request, and applies the decision IT approved.
-# It reports installed programs, USB devices, and the public IP city/country.
-# It does not record keystrokes, screenshots, documents, or GPS.
+# It reports installed programs, USB devices, the public IP city/country,
+# web searches, active time, and which app is in front.
+# It does not record keystrokes, screenshots, documents, page contents, or GPS.
 param(
-  [switch]$Enforce
+  [switch]$Enforce,
+  [switch]$Sample
 )
 
 $ErrorActionPreference = 'Stop'
@@ -288,6 +290,320 @@ function Set-UsbPolicy([string]$Mode) {
   Write-AgentLog "USB storage set to $label. New USB connections pick this up."
 }
 
+function Initialize-MulkNative {
+  if (-not ('MulkNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class MulkNative {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern int sqlite3_open_v2(byte[] filename, out IntPtr db, int flags, IntPtr vfs);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern int sqlite3_close(IntPtr db);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern int sqlite3_prepare_v2(IntPtr db, byte[] sql, int nByte, out IntPtr stmt, IntPtr tail);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern int sqlite3_step(IntPtr stmt);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern int sqlite3_finalize(IntPtr stmt);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern int sqlite3_bind_int64(IntPtr stmt, int index, long value);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern IntPtr sqlite3_column_text(IntPtr stmt, int iCol);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern int sqlite3_column_bytes(IntPtr stmt, int iCol);
+  [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+  public static extern long sqlite3_column_int64(IntPtr stmt, int iCol);
+  public static byte[] Utf8(string text) { return Encoding.UTF8.GetBytes(text + "\0"); }
+  public static string ColumnText(IntPtr stmt, int iCol) {
+    IntPtr p = sqlite3_column_text(stmt, iCol);
+    if (p == IntPtr.Zero) return "";
+    int n = sqlite3_column_bytes(stmt, iCol);
+    if (n <= 0) return "";
+    byte[] buf = new byte[n];
+    Marshal.Copy(p, buf, 0, n);
+    return Encoding.UTF8.GetString(buf);
+  }
+}
+'@
+  }
+}
+
+function Get-IdleSeconds {
+  Initialize-MulkNative
+  $info = New-Object MulkNative+LASTINPUTINFO
+  $info.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
+  [void][MulkNative]::GetLastInputInfo([ref]$info)
+  $idle = [Environment]::TickCount - [int]$info.dwTime
+  if ($idle -lt 0) { $idle = [int]([uint32]$idle) }
+  return [int]($idle / 1000)
+}
+
+function Get-ForegroundApp {
+  Initialize-MulkNative
+  $hwnd = [MulkNative]::GetForegroundWindow()
+  if ($hwnd -eq [IntPtr]::Zero) { return $null }
+  $procId = [uint32]0
+  [void][MulkNative]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+  $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+  if (-not $proc) { return $null }
+  $key = $proc.ProcessName.ToLower()
+  $names = @{
+    chrome = 'Chrome'; msedge = 'Edge'; firefox = 'Firefox'; excel = 'Excel'; winword = 'Word'
+    powerpnt = 'PowerPoint'; outlook = 'Outlook'; teams = 'Teams'; slack = 'Slack'; code = 'VS Code'
+    explorer = 'File Explorer'; olk = 'Outlook'; winproj = 'Project'
+  }
+  if ($names.ContainsKey($key)) { return $names[$key] }
+  if ($key -in @('lockapp', 'logonui', 'searchhost', 'shellexperiencehost')) { return $null }
+  return $proc.ProcessName
+}
+
+function Read-ActivityQueue {
+  $path = Join-Path $Root 'activity.json'
+  $empty = @{ day = (Get-Date).ToString('yyyy-MM-dd'); activeSeconds = 0; apps = @(); lastTick = 0 }
+  if (-not (Test-Path $path)) { return $empty }
+  try {
+    $raw = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    $apps = @()
+    foreach ($app in @($raw.apps)) {
+      if ($app.name) { $apps += @{ name = [string]$app.name; seconds = [int]$app.seconds } }
+    }
+    return @{ day = [string]$raw.day; activeSeconds = [int]$raw.activeSeconds; apps = $apps; lastTick = [uint32]$raw.lastTick }
+  } catch { return $empty }
+}
+
+function Save-ActivityQueue($queue) {
+  $appsJson = ConvertTo-JsonArray @($queue.apps)
+  $json = '{"day":' + (ConvertTo-Json ([string]$queue.day)) + ',"activeSeconds":' + [int]$queue.activeSeconds + ',"lastTick":' + [uint32]$queue.lastTick + ',"apps":' + $appsJson + '}'
+  Set-Content -Path (Join-Path $Root 'activity.json') -Value $json -Encoding UTF8
+}
+
+function Add-ActivitySample {
+  $tick = [uint32][Environment]::TickCount
+  $queue = Read-ActivityQueue
+  $today = (Get-Date).ToString('yyyy-MM-dd')
+  if ($queue.day -and $queue.day -ne $today -and ([int]$queue.activeSeconds -gt 0 -or @($queue.apps).Count -gt 0)) {
+    $queue.lastTick = $tick
+    Save-ActivityQueue $queue
+    return
+  }
+  $elapsed = 60
+  if ($queue.lastTick) {
+    $elapsed = [int](([uint32]($tick - [uint32]$queue.lastTick)) / 1000)
+    if ($elapsed -lt 15) { return }
+    if ($elapsed -gt 180) { $elapsed = 60 }
+  }
+  $queue.day = $today
+  $queue.lastTick = $tick
+  $idle = Get-IdleSeconds
+  $app = Get-ForegroundApp
+  if ($idle -lt 180 -and $app) {
+    $queue.activeSeconds = [int]$queue.activeSeconds + $elapsed
+    $apps = @($queue.apps)
+    $found = $false
+    foreach ($row in $apps) {
+      if ($row.name -eq $app) { $row.seconds = [int]$row.seconds + $elapsed; $found = $true }
+    }
+    if (-not $found) { $apps += @{ name = $app; seconds = $elapsed } }
+    $queue.apps = $apps
+  }
+  Save-ActivityQueue $queue
+}
+
+function Get-EnrolledProfile {
+  try { $account = [string](Get-AgentConfig).windows_user } catch { return $null }
+  $short = ($account -split '\\')[-1]
+  if (-not $short) { return $null }
+  foreach ($key in @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction SilentlyContinue)) {
+    $path = [string](Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
+    if ($path -and $path.TrimEnd('\') -like "*\$short") { return $path }
+  }
+  return $null
+}
+
+function Get-QueryValue([string]$Url, [string]$Name) {
+  try { $query = ([uri]$Url).Query.TrimStart('?') } catch { return $null }
+  foreach ($part in $query.Split('&')) {
+    $pair = $part.Split('=', 2)
+    if ($pair.Length -eq 2 -and $pair[0] -eq $Name) {
+      return [uri]::UnescapeDataString($pair[1].Replace('+', ' ')).Trim()
+    }
+  }
+  return $null
+}
+
+function Get-SearchFromUrl([string]$Url) {
+  try { $uri = [uri]$Url } catch { return $null }
+  $hostName = $uri.Host.ToLower()
+  $path = $uri.AbsolutePath.ToLower()
+  $engine = $null
+  $query = $null
+  if ($hostName -match '(^|\.)google\.' -and $path -eq '/search') { $engine = 'Google'; $query = Get-QueryValue $Url 'q' }
+  elseif ($hostName -eq 'www.bing.com' -and $path -eq '/search') { $engine = 'Bing'; $query = Get-QueryValue $Url 'q' }
+  elseif ($hostName -match 'duckduckgo\.com') { $engine = 'DuckDuckGo'; $query = Get-QueryValue $Url 'q' }
+  elseif ($hostName -match 'search\.yahoo\.') { $engine = 'Yahoo'; $query = Get-QueryValue $Url 'p' }
+  elseif ($hostName -match 'youtube\.com' -and $path -eq '/results') { $engine = 'YouTube'; $query = Get-QueryValue $Url 'search_query' }
+  if (-not $engine -or -not $query) { return $null }
+  if ($query.Length -lt 1 -or $query.Length -gt 300) { return $null }
+  return @{ engine = $engine; query = $query }
+}
+
+function Invoke-HistoryQuery($DbPath, $Sql, $Since) {
+  Initialize-MulkNative
+  $uri = 'file:' + ($DbPath -replace '\\', '/') + '?mode=ro&immutable=1'
+  $db = [IntPtr]::Zero
+  $stmt = [IntPtr]::Zero
+  $rows = @()
+  $opened = [MulkNative]::sqlite3_open_v2([MulkNative]::Utf8($uri), [ref]$db, 1, [IntPtr]::Zero)
+  if ($opened -ne 0) { throw "Could not open browser history ($opened)." }
+  try {
+    $prepared = [MulkNative]::sqlite3_prepare_v2($db, [MulkNative]::Utf8($Sql), -1, [ref]$stmt, [IntPtr]::Zero)
+    if ($prepared -ne 0) { throw "Could not read browser history ($prepared)." }
+    if ($Sql.Contains('?')) { [void][MulkNative]::sqlite3_bind_int64($stmt, 1, [int64]$Since) }
+    while ([MulkNative]::sqlite3_step($stmt) -eq 100) {
+      $rows += @{
+        url = [MulkNative]::ColumnText($stmt, 0)
+        visited = [int64][MulkNative]::sqlite3_column_int64($stmt, 1)
+      }
+      if ($rows.Count -ge 80) { break }
+    }
+  } finally {
+    if ($stmt -ne [IntPtr]::Zero) { [void][MulkNative]::sqlite3_finalize($stmt) }
+    if ($db -ne [IntPtr]::Zero) { [void][MulkNative]::sqlite3_close($db) }
+  }
+  return $rows
+}
+
+function Copy-BrowserDb($Source, $DestDir, $Leaf) {
+  New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
+  foreach ($suffix in @('', '-wal', '-shm')) {
+    $from = $Source + $suffix
+    if (Test-Path $from) { Copy-Item -Path $from -Destination (Join-Path $DestDir ($Leaf + $suffix)) -Force }
+  }
+}
+
+function Read-NewSearches {
+  $cursorPath = Join-Path $Root 'search-cursors.json'
+  $cursors = @{}
+  $haveCursor = Test-Path $cursorPath
+  if ($haveCursor) {
+    try {
+      $saved = Get-Content -Path $cursorPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      foreach ($prop in $saved.PSObject.Properties) { $cursors[$prop.Name] = [int64]$prop.Value }
+    } catch { $haveCursor = $false }
+  }
+  $profile = Get-EnrolledProfile
+  if (-not $profile) { return @{ searches = @(); cursors = $cursors; baseline = -not $haveCursor } }
+  $sources = @()
+  $chromeRoot = Join-Path $profile 'AppData\Local\Google\Chrome\User Data'
+  $edgeRoot = Join-Path $profile 'AppData\Local\Microsoft\Edge\User Data'
+  foreach ($root in @($chromeRoot, $edgeRoot)) {
+    if (-not (Test-Path $root)) { continue }
+    foreach ($dir in @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' })) {
+      $history = Join-Path $dir.FullName 'History'
+      if (Test-Path $history) { $sources += @{ path = $history; kind = 'chromium'; leaf = 'History' } }
+    }
+  }
+  $firefox = Join-Path $profile 'AppData\Roaming\Mozilla\Firefox\Profiles'
+  if (Test-Path $firefox) {
+    foreach ($dir in @(Get-ChildItem $firefox -Directory -ErrorAction SilentlyContinue)) {
+      $places = Join-Path $dir.FullName 'places.sqlite'
+      if (Test-Path $places) { $sources += @{ path = $places; kind = 'firefox'; leaf = 'places.sqlite' } }
+    }
+  }
+  $found = @()
+  $next = @{}
+  foreach ($source in $sources) {
+    $key = $source.path.ToLower()
+    $since = 0
+    $known = $cursors.ContainsKey($key)
+    if ($known) { $since = [int64]$cursors[$key] }
+    $copyDir = Join-Path $env:TEMP ('MulkHist-' + [guid]::NewGuid().ToString('N'))
+    try {
+      Copy-BrowserDb $source.path $copyDir $source.leaf
+      $copy = Join-Path $copyDir $source.leaf
+      if (-not $known) {
+        if ($source.kind -eq 'firefox') { $sql = "select '', coalesce(max(last_visit_date), 0) from moz_places" }
+        else { $sql = "select '', coalesce(max(last_visit_time), 0) from urls" }
+        $maxRows = @(Invoke-HistoryQuery $copy $sql 0)
+        $next[$key] = $(if ($maxRows.Count) { [int64]$maxRows[0].visited } else { 0 })
+        continue
+      }
+      if ($source.kind -eq 'firefox') {
+        $sql = "select url, last_visit_date from moz_places where last_visit_date > ? and url is not null order by last_visit_date asc limit 80"
+      } else {
+        $sql = "select url, last_visit_time from urls where last_visit_time > ? and url is not null order by last_visit_time asc limit 80"
+      }
+      $rows = @(Invoke-HistoryQuery $copy $sql $since)
+      $max = $since
+      foreach ($row in $rows) {
+        if ([int64]$row.visited -gt $max) { $max = [int64]$row.visited }
+        $parsed = Get-SearchFromUrl ([string]$row.url)
+        if (-not $parsed) { continue }
+        if ($source.kind -eq 'firefox') {
+          $when = ([datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc')).AddTicks([int64]$row.visited * 10)
+        } else {
+          $when = ([datetime]::SpecifyKind([datetime]'1601-01-01', 'Utc')).AddTicks([int64]$row.visited * 10)
+        }
+        $found += @{ query = $parsed.query; engine = $parsed.engine; at = $when.ToString('o') }
+      }
+      $next[$key] = $max
+    } catch {
+      Write-AgentLog ("Search read failed for " + $source.path + ": " + $_.Exception.Message)
+      if ($cursors.ContainsKey($key)) { $next[$key] = $cursors[$key] }
+    } finally {
+      Remove-Item -Path $copyDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+  return @{ searches = @($found | Select-Object -First 80); cursors = $next; baseline = -not $haveCursor }
+}
+
+function Save-SearchCursors($cursors) {
+  $obj = @{}
+  foreach ($key in $cursors.Keys) { $obj[$key] = [string]$cursors[$key] }
+  $obj | ConvertTo-Json -Compress | Set-Content -Path (Join-Path $Root 'search-cursors.json') -Encoding UTF8
+}
+
+function Send-Usage($Config) {
+  $batch = Read-NewSearches
+  $queue = Read-ActivityQueue
+  $searches = @()
+  if (-not $batch.baseline) { $searches = @($batch.searches) }
+  $active = [int]$queue.activeSeconds
+  $apps = @($queue.apps)
+  if ($batch.baseline) {
+    Save-SearchCursors $batch.cursors
+    Write-AgentLog 'Search baseline saved. Earlier browser searches are not imported.'
+  }
+  if ($active -le 0 -and $apps.Count -eq 0 -and $searches.Count -eq 0) {
+    if (-not $batch.baseline) { Save-SearchCursors $batch.cursors }
+    return
+  }
+  $tokenJson = ConvertTo-Json -InputObject ([string]$Config.token) -Compress
+  $json = '{"p_token":' + $tokenJson + ',"p_date":' + (ConvertTo-Json ([string]$queue.day)) + ',"p_active_seconds":' + $active + ',"p_apps":' + (ConvertTo-JsonArray $apps) + ',"p_searches":' + (ConvertTo-JsonArray $searches) + '}'
+  $result = Invoke-AgentRpc $Config 'agent_report_usage' $null $json
+  Save-SearchCursors $batch.cursors
+  $queue.activeSeconds = 0
+  $queue.apps = @()
+  Save-ActivityQueue $queue
+  Write-AgentLog ("Usage report: " + $result.active_seconds + " active seconds, " + $result.apps + " apps, " + $result.searches + " searches.")
+}
+
+function Ensure-SampleTask {
+  try { $user = [string](Get-AgentConfig).windows_user } catch { return }
+  if (-not $user) { return }
+  $tr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Sample'
+  & schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 1 /RU $user /IT /RL LIMITED /TR $tr /F | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-AgentLog 'The one-minute activity sample could not be scheduled. Leave the Mulk Agent window open so active time is still counted.'
+  }
+}
+
 function Invoke-Enforce {
   $config = Get-AgentConfig
   $policy = Get-Policy $config
@@ -302,6 +618,8 @@ function Invoke-Enforce {
   try { Send-SoftwareInventory $config } catch { Write-AgentLog ("Software report failed: " + $_.Exception.Message) }
   try { Send-UsbNotices $config $policy } catch { Write-AgentLog ("USB report failed: " + $_.Exception.Message) }
   try { Send-Presence $config } catch { Write-AgentLog ("Location report failed: " + $_.Exception.Message) }
+  try { Ensure-SampleTask } catch { Write-AgentLog ("Activity schedule failed: " + $_.Exception.Message) }
+  try { Send-Usage $config } catch { Write-AgentLog ("Usage report failed: " + $_.Exception.Message) }
   $summary = if ([bool]$policy.hold) {
     'On hold. Admin rights are off and USB storage is blocked.'
   } elseif ($policy.admin -eq 'standing') {
@@ -318,6 +636,14 @@ function Invoke-Enforce {
 if ($Enforce) {
   try { Invoke-Enforce } catch {
     Write-AgentLog ("Enforcement failed: " + $_.Exception.Message)
+    exit 1
+  }
+  exit 0
+}
+
+if ($Sample) {
+  try { Add-ActivitySample } catch {
+    Write-AgentLog ("Activity sample failed: " + $_.Exception.Message)
     exit 1
   }
   exit 0
@@ -345,7 +671,7 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, USB devices, and the city and country of this computer''s public IP. It does not read documents, keystrokes, screenshots, or GPS.'
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, USB devices, the city and country of the public IP, web searches, active time, and which app is in front. It does not read page contents, passwords, documents, keystrokes, screenshots, or GPS.'
 $intro.Size = New-Object System.Drawing.Size(460, 72)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
@@ -462,7 +788,10 @@ $ask.Add_Click({
 $refresh.Add_Click({ Update-Window })
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 60000
-$timer.Add_Tick({ Update-Window })
+$timer.Add_Tick({
+  try { Add-ActivitySample } catch { }
+  Update-Window
+})
 $timer.Start()
 $form.Add_Shown({ Update-Window })
 [void]$form.ShowDialog()
