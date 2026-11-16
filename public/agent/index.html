@@ -39,6 +39,9 @@
       <li>Type the 8 character code. Confirm the Windows account of the person who uses that computer.</li>
       <li>Leave the Mulk Agent window available. It also opens at the next sign-in.</li>
     </ol>
+    <h2>Update an existing install</h2>
+    <p>Computers that already have Mulk Agent keep the copy they downloaded. To pick up software reports, run this in an Administrator PowerShell. It does not need a new code.</p>
+    <pre>powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest https://mulk-asset-manager.vercel.app/agent/MulkAgent.ps1 -OutFile C:\ProgramData\MulkAgent\MulkAgent.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Enforce"</pre>
     <h2>Remove it</h2>
     <p>In an Administrator PowerShell:</p>
     <pre>schtasks /Delete /TN "Mulk Agent Enforce" /F
