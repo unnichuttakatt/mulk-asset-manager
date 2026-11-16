@@ -25,6 +25,7 @@ export async function dashboardView(main) {
   let away = [];
   let compliance = [];
   let devices = [];
+  let locked = [];
   try {
     [software, copies, away] = await Promise.all([
       store.db.select('software_events', { select: 'id,asset_id,name,kind,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }),
@@ -38,6 +39,9 @@ export async function dashboardView(main) {
   try {
     devices = await store.db.select('agent_devices', { select: 'asset_id,hostname,last_seen', order: 'last_seen.asc', limit: '200' }) || [];
   } catch { devices = []; }
+  try {
+    locked = await store.db.select('laptop_controls', { select: 'asset_id,lock_reason', locked: 'eq.true', limit: '8' }) || [];
+  } catch { locked = []; }
   const quietCutoff = Date.now() - 24 * 3600 * 1000;
   const offline = devices.filter(d => !d.last_seen || new Date(d.last_seen).getTime() < quietCutoff);
   const by = Object.fromEntries(countBy(assets, 'status'));
@@ -118,6 +122,17 @@ export async function dashboardView(main) {
           }).join('')}
         </tbody></table></div>` : '<div class="empty">No open data-leaving reports. A removable drive is reported by its letter and volume name.</div>'}
       </div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-h"><h2>Locked by IT</h2><a href="#/control">${locked.length ? locked.length + ' locked' : 'Control'}</a></div>
+      ${locked.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>
+        ${locked.map(r => {
+          const asset = assets.find(a => a.id === r.asset_id);
+          return `<tr class="clickable" data-href="#/control">
+            <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.lock_reason || '')}</div></td>
+          </tr>`;
+        }).join('')}
+      </tbody></table></div>` : '<div class="empty">No asset is locked. In Control, Lock asset stops company use. On a Windows computer, Mulk Agent also locks the session.</div>'}
     </div>
     <div class="grid-2" style="margin-bottom:16px">
       <div class="card">

@@ -11,6 +11,9 @@ begin
   end if;
 end $$;
 
+alter table public.laptop_controls add column if not exists locked boolean not null default false;
+alter table public.laptop_controls add column if not exists lock_reason text;
+
 create table if not exists public.device_health (
   asset_id          uuid primary key references public.assets(id) on delete cascade,
   manufacturer      text,
@@ -456,6 +459,8 @@ declare
   ends_at timestamptz;
   hold_flag boolean := false;
   hold_text text;
+  lock_flag boolean := false;
+  lock_text text;
   usb text := 'block';
   usb_rule text;
   rules jsonb;
@@ -475,13 +480,15 @@ begin
     ends_at := ctrl.elevation_ends_at;
     hold_flag := coalesce(ctrl.hold, false);
     hold_text := ctrl.hold_reason;
+    lock_flag := coalesce(ctrl.locked, false);
+    lock_text := ctrl.lock_reason;
     if ctrl.admin = 'standing' then
       live_admin := 'standing';
     elsif ctrl.admin = 'elevated' and ctrl.elevation_ends_at is not null and ctrl.elevation_ends_at > now() then
       live_admin := 'elevated';
     end if;
     usb := case policy_name when 'engineering' then 'read' when 'field' then 'read' else 'block' end;
-    if hold_flag then
+    if hold_flag or lock_flag then
       live_admin := 'standard';
       usb := 'block';
     end if;
@@ -507,6 +514,8 @@ begin
     'usb', usb,
     'hold', hold_flag,
     'hold_reason', hold_text,
+    'locked', lock_flag,
+    'lock_reason', lock_text,
     'rules', rules
   );
 end;

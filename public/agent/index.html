@@ -31,6 +31,7 @@
       <p>It also sends the public IP address and the city and country that IP belongs to. A country other than the UAE is an alert. It does not use GPS. USB devices already connected at the first check are the baseline. A USB device plugged in after that is an alert, by device name only. Files on the drive are not listed.</p>
       <p>While someone is at the computer, it counts active minutes and which app is in front. Google, Bing, DuckDuckGo, Yahoo, and YouTube searches made after this starts are listed under Usage. Searches already in the browser are not imported. Page contents, documents, the screen, and the keyboard are not collected.</p>
       <p>From Control, IT can set the built-in Administrator password once. The computer applies it and the password is then deleted. It is not written to the agent log, and the account is not enabled by that change. IT can also queue an HTTPS installer that ends in .msi or .exe. The file is downloaded, run, and deleted. This is not a remote command prompt.</p>
+      <p>IT can lock the computer from Control. Mulk Agent then locks Windows the same way as Win+L, and locks it again if the person signs back in, until IT unlocks it. The reason is shown in this window and at the next sign-in. The lock does not wipe the computer, and it does not capture the screen or the keyboard.</p>
     </div>
     <h2>Install on one computer</h2>
     <ol>
@@ -43,7 +44,7 @@
       <li>Leave the Mulk Agent window available. It also opens at the next sign-in.</li>
     </ol>
     <h2>Update an existing install</h2>
-    <p>Computers that already have Mulk Agent keep the copy they downloaded. To pick up health, the one-time password change, and remote install, run this in an Administrator PowerShell. It does not need a new code. Then close the Mulk Agent window and open it again.</p>
+    <p>Computers that already have Mulk Agent keep the copy they downloaded. To pick up health, the one-time password change, remote install, and the admin lock, run this in an Administrator PowerShell. It does not need a new code. Then close the Mulk Agent window and open it again.</p>
     <pre>powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest https://mulk-asset-manager.vercel.app/agent/MulkAgent.ps1 -OutFile C:\ProgramData\MulkAgent\MulkAgent.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Enforce"</pre>
     <h2>Remove it</h2>
     <p>In an Administrator PowerShell:</p>

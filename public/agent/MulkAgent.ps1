@@ -792,15 +792,75 @@ function Invoke-PendingInstall($Config) {
   Write-AgentLog ("Install " + $name + ": " + $detail)
 }
 
+function Initialize-SessionLock {
+  if ('MulkSessionLock' -as [type]) { return }
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MulkSessionLock {
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool LockWorkStation();
+}
+'@
+}
+
+function Lock-InteractiveSession {
+  try {
+    Initialize-SessionLock
+    [MulkSessionLock]::LockWorkStation() | Out-Null
+  } catch { }
+}
+
+function Set-LockNotice([bool]$Locked, [string]$Reason) {
+  $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+  try {
+    if ($Locked) {
+      $text = 'This computer is locked by Mulk IT.'
+      if ($Reason) { $text = $text + ' ' + $Reason }
+      if ($text.Length -gt 400) { $text = $text.Substring(0, 400) }
+      if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+      New-ItemProperty -Path $key -Name legalnoticecaption -Value 'Locked by IT' -PropertyType String -Force | Out-Null
+      New-ItemProperty -Path $key -Name legalnoticetext -Value $text -PropertyType String -Force | Out-Null
+    } else {
+      $caption = (Get-ItemProperty -Path $key -Name legalnoticecaption -ErrorAction SilentlyContinue).legalnoticecaption
+      if ($caption -eq 'Locked by IT') {
+        Remove-ItemProperty -Path $key -Name legalnoticecaption -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $key -Name legalnoticetext -ErrorAction SilentlyContinue
+      }
+    }
+  } catch {
+    Write-AgentLog 'The sign-in notice could not be updated.'
+  }
+}
+
+function Invoke-RemoteSessionLock([string]$User) {
+  if (-not $User) { return }
+  $tr = 'rundll32.exe user32.dll,LockWorkStation'
+  & schtasks.exe /Create /TN 'Mulk Agent Lock' /SC ONCE /ST 00:00 /RU $User /IT /RL LIMITED /TR $tr /F | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-AgentLog 'The Windows session could not be locked from the system task. It locks when the Mulk Agent window is open.'
+    return
+  }
+  & schtasks.exe /Run /TN 'Mulk Agent Lock' | Out-Null
+  Write-AgentLog 'Windows session lock requested.'
+}
+
 function Invoke-Enforce {
   $config = Get-AgentConfig
   $policy = Get-Policy $config
   $user = [string]$policy.windows_user
   if (-not $user) { $user = [string]$config.windows_user }
-  $grant = ($policy.admin -eq 'elevated' -or $policy.admin -eq 'standing') -and -not [bool]$policy.hold
+  $locked = [bool]$policy.locked
+  try { Set-LockNotice $locked ([string]$policy.lock_reason) } catch { }
+  $grant = ($policy.admin -eq 'elevated' -or $policy.admin -eq 'standing') -and -not [bool]$policy.hold -and -not $locked
   Set-LocalAdmin $user $grant
   $usb = [string]$policy.usb
-  if ([bool]$policy.hold) { $usb = 'block' }
+  if ([bool]$policy.hold -or $locked) { $usb = 'block' }
+  if ($locked) {
+    try { Invoke-RemoteSessionLock $user } catch { Write-AgentLog 'Session lock failed.' }
+  } else {
+    & schtasks.exe /Delete /TN 'Mulk Agent Lock' /F 2>$null | Out-Null
+  }
   if ($usb -notin @('block', 'read', 'allow')) { $usb = 'block' }
   Set-UsbPolicy $usb
   try { Send-SoftwareInventory $config } catch { Write-AgentLog ("Software report failed: " + $_.Exception.Message) }
@@ -811,7 +871,9 @@ function Invoke-Enforce {
   try { Send-Presence $config } catch { Write-AgentLog ("Location report failed: " + $_.Exception.Message) }
   try { Ensure-SampleTask } catch { Write-AgentLog ("Activity schedule failed: " + $_.Exception.Message) }
   try { Send-Usage $config } catch { Write-AgentLog ("Usage report failed: " + $_.Exception.Message) }
-  $summary = if ([bool]$policy.hold) {
+  $summary = if ($locked) {
+    'Locked by IT. ' + [string]$policy.lock_reason
+  } elseif ([bool]$policy.hold) {
     'On hold. Admin rights are off and USB storage is blocked.'
   } elseif ($policy.admin -eq 'standing') {
     'Standing admin is on.'
@@ -833,6 +895,10 @@ if ($Enforce) {
 }
 
 if ($Sample) {
+  try {
+    $samplePolicy = Get-Policy (Get-AgentConfig)
+    if ([bool]$samplePolicy.locked) { Lock-InteractiveSession }
+  } catch { }
   try { Add-ActivitySample } catch {
     Write-AgentLog ("Activity sample failed: " + $_.Exception.Message)
     exit 1
@@ -849,8 +915,8 @@ if (-not $mutex.WaitOne(0, $false)) { exit 0 }
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Mulk Agent'
 $form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(520, 780)
-$form.MinimumSize = New-Object System.Drawing.Size(480, 700)
+$form.Size = New-Object System.Drawing.Size(520, 800)
+$form.MinimumSize = New-Object System.Drawing.Size(480, 720)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 $form.BackColor = [System.Drawing.Color]::FromArgb(244, 245, 247)
 
@@ -862,52 +928,52 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer and a one-time local Administrator password change. It does not read files, capture the screen, record the keyboard, or use GPS. The password is not written to the log.'
-$intro.Size = New-Object System.Drawing.Size(460, 96)
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock works like Win+L. It does not read files, capture the screen, record the keyboard, or use GPS.'
+$intro.Size = New-Object System.Drawing.Size(460, 112)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
 
 $status = New-Object System.Windows.Forms.Label
 $status.Size = New-Object System.Drawing.Size(460, 96)
-$status.Location = New-Object System.Drawing.Point(20, 156)
+$status.Location = New-Object System.Drawing.Point(20, 172)
 $form.Controls.Add($status)
 
 $rules = New-Object System.Windows.Forms.ListBox
 $rules.Size = New-Object System.Drawing.Size(460, 130)
-$rules.Location = New-Object System.Drawing.Point(20, 260)
+$rules.Location = New-Object System.Drawing.Point(20, 276)
 $form.Controls.Add($rules)
 
 $nameLabel = New-Object System.Windows.Forms.Label
 $nameLabel.Text = 'Your name'
-$nameLabel.Location = New-Object System.Drawing.Point(20, 402)
+$nameLabel.Location = New-Object System.Drawing.Point(20, 418)
 $nameLabel.AutoSize = $true
 $form.Controls.Add($nameLabel)
 
 $nameBox = New-Object System.Windows.Forms.TextBox
-$nameBox.Location = New-Object System.Drawing.Point(20, 424)
+$nameBox.Location = New-Object System.Drawing.Point(20, 440)
 $nameBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($nameBox)
 
 $reasonLabel = New-Object System.Windows.Forms.Label
 $reasonLabel.Text = 'Why you need admin rights'
-$reasonLabel.Location = New-Object System.Drawing.Point(20, 460)
+$reasonLabel.Location = New-Object System.Drawing.Point(20, 476)
 $reasonLabel.AutoSize = $true
 $form.Controls.Add($reasonLabel)
 
 $reasonBox = New-Object System.Windows.Forms.TextBox
-$reasonBox.Location = New-Object System.Drawing.Point(20, 482)
+$reasonBox.Location = New-Object System.Drawing.Point(20, 498)
 $reasonBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($reasonBox)
 
 $ask = New-Object System.Windows.Forms.Button
 $ask.Text = 'Request admin rights'
-$ask.Location = New-Object System.Drawing.Point(20, 522)
+$ask.Location = New-Object System.Drawing.Point(20, 538)
 $ask.Size = New-Object System.Drawing.Size(180, 34)
 $form.Controls.Add($ask)
 
 $refresh = New-Object System.Windows.Forms.Button
 $refresh.Text = 'Refresh'
-$refresh.Location = New-Object System.Drawing.Point(210, 522)
+$refresh.Location = New-Object System.Drawing.Point(210, 538)
 $refresh.Size = New-Object System.Drawing.Size(100, 34)
 $form.Controls.Add($refresh)
 
@@ -915,7 +981,7 @@ $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Multiline = $true
 $logBox.ReadOnly = $true
 $logBox.ScrollBars = 'Vertical'
-$logBox.Location = New-Object System.Drawing.Point(20, 570)
+$logBox.Location = New-Object System.Drawing.Point(20, 586)
 $logBox.Size = New-Object System.Drawing.Size(460, 80)
 $form.Controls.Add($logBox)
 
@@ -936,7 +1002,11 @@ function Update-Window {
       'elevated' { 'Temporary admin until ' + [string]$policy.elevation_ends_at }
       default { 'Standard user' }
     }
-    $holdText = if ([bool]$policy.hold) { 'On hold. ' + [string]$policy.hold_reason } else { 'Not on hold' }
+    $script:sessionLocked = [bool]$policy.locked
+    if ($script:sessionLocked) { Lock-InteractiveSession }
+    $holdText = if ($script:sessionLocked) { 'Locked by IT. ' + [string]$policy.lock_reason }
+      elseif ([bool]$policy.hold) { 'On hold. ' + [string]$policy.hold_reason }
+      else { 'Not locked' }
     $network = 'Network location is sent to IT.'
     $cache = Join-Path $Root 'presence-cache.json'
     if (Test-Path $cache) {
@@ -977,14 +1047,22 @@ $ask.Add_Click({
 })
 
 $refresh.Add_Click({ Update-Window })
+$script:sessionLocked = $false
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 60000
 $timer.Add_Tick({
   try { Add-ActivitySample } catch { }
   Update-Window
 })
+$lockTimer = New-Object System.Windows.Forms.Timer
+$lockTimer.Interval = 20000
+$lockTimer.Add_Tick({
+  if ($script:sessionLocked) { Lock-InteractiveSession }
+})
 $timer.Start()
+$lockTimer.Start()
 $form.Add_Shown({ Update-Window })
 [void]$form.ShowDialog()
 $timer.Stop()
+$lockTimer.Stop()
 $mutex.ReleaseMutex() | Out-Null

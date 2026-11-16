@@ -115,6 +115,7 @@ grant usage, select on sequence public.copy_activity_id_seq to authenticated;`;
 
 const BASE_COLS = 'asset_id,admin,elevation_ends_at,admin_note,policy,hold,hold_reason,updated_at,updated_by';
 const WIDE_COLS = BASE_COLS + ',connection,print_mode';
+const LOCK_COLS = WIDE_COLS + ',locked,lock_reason';
 
 const CHANNELS = { usb: 'USB copy', clipboard: 'Clipboard', cloud: 'Personal cloud', mail: 'Outside email', print: 'Print' };
 const COPY_ACTIONS = { blocked: 'Blocked', warned: 'Warned', quarantined: 'Quarantined' };
@@ -135,6 +136,7 @@ const ui = {
   jobs: [],
   resets: [],
   opsReady: true,
+  lockReady: true,
   source: 'db',
   wide: true,
   controls: new Map(),
@@ -207,7 +209,7 @@ function missingTable(err) {
 
 function missingColumn(err) {
   const m = String(err?.message || err || '').toLowerCase();
-  return m.includes('connection') || m.includes('print_mode');
+  return m.includes('connection') || m.includes('print_mode') || m.includes('locked') || m.includes('lock_reason');
 }
 
 function who() {
@@ -223,6 +225,8 @@ function blank(asset) {
     policy: suggestPolicy(asset),
     hold: false,
     hold_reason: null,
+    locked: false,
+    lock_reason: null,
     connection: 'not_connected',
     print_mode: 'open',
     _saved: false,
@@ -237,6 +241,7 @@ function normalise(row) {
   return {
     ...row,
     hold: !!row.hold,
+    locked: !!row.locked,
     connection: row.connection === 'enrolled' ? 'enrolled' : 'not_connected',
     print_mode: PRINT_MODES[row.print_mode] ? row.print_mode : 'open',
     policy: POLICIES[row.policy] ? row.policy : 'baseline',
@@ -269,6 +274,10 @@ function dbBody(next) {
     hold: !!next.hold,
     hold_reason: next.hold_reason || null,
   };
+  if (ui.lockReady) {
+    body.locked = !!next.locked;
+    body.lock_reason = next.lock_reason || null;
+  }
   if (ui.wide) {
     body.connection = next.connection === 'enrolled' ? 'enrolled' : 'not_connected';
     body.print_mode = PRINT_MODES[next.print_mode] ? next.print_mode : 'open';
@@ -280,11 +289,26 @@ async function loadControls() {
   try {
     let rows;
     try {
-      rows = await store.db.selectAll('laptop_controls', { select: WIDE_COLS });
-      ui.wide = true;
+      try {
+        rows = await store.db.selectAll('laptop_controls', { select: LOCK_COLS });
+        ui.wide = true;
+        ui.lockReady = true;
+      } catch (err) {
+        ui.lockReady = false;
+        if (!missingColumn(err)) throw err;
+        try {
+          rows = await store.db.selectAll('laptop_controls', { select: WIDE_COLS });
+          ui.wide = true;
+        } catch (err2) {
+          if (!missingColumn(err2)) throw err2;
+          ui.wide = false;
+          rows = await store.db.selectAll('laptop_controls', { select: BASE_COLS });
+        }
+      }
     } catch (err) {
       if (!missingColumn(err)) throw err;
       ui.wide = false;
+      ui.lockReady = false;
       rows = await store.db.selectAll('laptop_controls', { select: BASE_COLS });
     }
     const events = await store.db.select('laptop_control_events', { select: 'id,asset_id,action,detail,performed_by,created_at', order: 'created_at.desc', limit: '40' });
@@ -297,6 +321,7 @@ async function loadControls() {
     const local = readLocal();
     ui.source = 'local';
     ui.wide = true;
+    ui.lockReady = true;
     ui.controls = new Map(Object.values(local.controls || {}).map(r => [r.asset_id, normalise(r)]));
     ui.events = local.events || [];
   }
@@ -315,6 +340,10 @@ async function persist(asset, next, action, detail) {
     try {
       await write();
     } catch (err) {
+      const message = String(err?.message || '').toLowerCase();
+      if (message.includes('locked') || message.includes('lock_reason')) {
+        throw new Error('Lock is not stored yet. Run supabase/asset-lock.sql once in the Supabase SQL editor.');
+      }
       if (!ui.wide || !missingColumn(err)) throw err;
       ui.wide = false;
       await write();
@@ -342,6 +371,7 @@ function filtered() {
 }
 
 function controlSummary(asset, c) {
+  if (c.locked) return 'Locked';
   const kind = kindOf(asset);
   if (kind === 'laptop' || kind === 'desktop') return adminText(c);
   if (kind === 'printer') return PRINT_MODES[c.print_mode] || 'Open';
@@ -541,13 +571,14 @@ function paint(main) {
   const focusId = document.activeElement?.id;
   const caret = document.activeElement?.selectionStart;
   const rows = filtered();
-  const counts = { computers: 0, printers: 0, hold: 0, waiting: 0 };
+  const counts = { computers: 0, printers: 0, hold: 0, locked: 0, waiting: 0 };
   for (const a of ui.assets) {
     const kind = kindOf(a);
     const c = current(a);
     if (kind === 'laptop' || kind === 'desktop') counts.computers += 1;
     if (kind === 'printer') counts.printers += 1;
     if (c.hold) counts.hold += 1;
+    if (c.locked) counts.locked += 1;
     if (enrollable(kind) && c.connection !== 'enrolled') counts.waiting += 1;
   }
   const selected = ui.assets.find(a => a.id === ui.selected) || null;
@@ -593,6 +624,7 @@ function paint(main) {
       <div class="card kpi"><div class="k-label">Printers</div><div class="k-val">${counts.printers}</div></div>
       <div class="card kpi"><div class="k-label">Not enrolled</div><div class="k-val">${counts.waiting}</div></div>
       <div class="card kpi"><div class="k-label">On hold</div><div class="k-val">${counts.hold}</div></div>
+      <div class="card kpi"><div class="k-label">Locked</div><div class="k-val">${counts.locked}</div></div>
     </div>
     <div class="card" style="margin-bottom:16px">
       <div class="filters">
@@ -616,7 +648,7 @@ function paint(main) {
             <td>${esc(a.site || '—')}</td>
             <td>${esc(controlSummary(a, c))}</td>
             <td>${enrolled ? esc(connectionText(a, c)) : `<span class="badge st-under_repair">${esc(connectionText(a, c))}</span>`}</td>
-            <td>${c.hold ? '<span class="badge st-broken">On hold</span>' : '<span class="muted">No</span>'}</td>
+            <td>${[c.locked ? '<span class="badge st-broken">Locked</span>' : '', c.hold ? '<span class="badge st-broken">On hold</span>' : ''].filter(Boolean).join(' ') || '<span class="muted">No</span>'}</td>
           </tr>`;
         }).join('')}
       </tbody></table></div>` : `<div class="empty">${ui.assets.length ? 'No assets match these filters.' : 'No active assets in the register yet.'}</div>`}
@@ -886,6 +918,12 @@ function detail(a) {
         <p class="muted" style="margin:10px 0 0">Open accepts jobs. Hold for release keeps a job until someone collects it at the printer. Black and white only rejects color. Stopped accepts nothing.</p>
       </div>` : ''}
       <div>
+        <h2 style="margin-bottom:8px">Lock</h2>
+        ${c.locked
+          ? `<p style="margin:0 0 10px">Locked${c.lock_reason ? ': ' + esc(c.lock_reason) : ''}. ${computer ? 'Mulk Agent locks the Windows session until you unlock it, and locks it again if the person signs back in.' : 'This asset should not be used until you unlock it.'} A lock does not wipe the computer.</p><button type="button" class="btn sm" data-act="unlock">Unlock asset</button>`
+          : `<p class="muted" style="margin:0 0 10px">A lock stops company use until you unlock it. On a Windows laptop or desktop, Mulk Agent locks the session the same way as Win+L. It does not read files, capture the screen, or record the keyboard. A lock does not wipe the computer.</p><button type="button" class="btn sm danger" data-act="lock">Lock asset</button>`}
+      </div>
+      <div>
         <h2 style="margin-bottom:8px">Hold</h2>
         ${c.hold
           ? `<p style="margin:0 0 10px">On hold${c.hold_reason ? ': ' + esc(c.hold_reason) : ''}. The person should see this reason.</p><button type="button" class="btn sm" data-act="release">Release hold</button>`
@@ -960,6 +998,23 @@ async function act(main, asset, kind) {
       await save(main, asset, { ...current(asset), hold: true, hold_reason: reason }, 'hold', `Placed on hold: ${reason}`);
     } else if (kind === 'release') {
       await save(main, asset, { ...c, hold: false, hold_reason: null }, 'hold', 'Hold released');
+    } else if (kind === 'lock') {
+      let reason = '';
+      const ok = await modal({
+        title: 'Lock asset',
+        submit: 'Lock',
+        danger: true,
+        body: `<p style="margin:0">The person should be able to read this reason. On a Windows computer, Mulk Agent locks the session until you unlock it. A lock does not wipe the computer.</p>
+          <label class="f">Reason<textarea name="reason" required placeholder="Why this ${esc(noun)} is locked"></textarea></label>`,
+        onSubmit(form) {
+          reason = form.reason.value.trim();
+          if (reason.length < 8 || reason.length > 300) throw new Error('Write a reason between a sentence and a short paragraph.');
+        },
+      });
+      if (!ok) return;
+      await save(main, asset, { ...current(asset), locked: true, lock_reason: reason }, 'lock', `Locked: ${reason}`);
+    } else if (kind === 'unlock') {
+      await save(main, asset, { ...c, locked: false, lock_reason: null }, 'lock', 'Lock released');
     } else if (kind === 'agent-code') {
       await askForAgentCode(asset);
     } else if (kind === 'download-setup') {

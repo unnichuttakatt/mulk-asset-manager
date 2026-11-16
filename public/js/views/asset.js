@@ -62,6 +62,7 @@ export async function assetView(main, params, id) {
   let usageDays = [];
   let searches = [];
   let health = [];
+  let lockRow = null;
   try {
     devices = await store.db.select('agent_devices', {
       asset_id: 'eq.' + id,
@@ -88,6 +89,10 @@ export async function assetView(main, params, id) {
   try {
     health = await store.db.select('device_health', { asset_id: 'eq.' + id, select: '*', limit: '1' }) || [];
   } catch { health = []; }
+  try {
+    const locks = await store.db.select('laptop_controls', { asset_id: 'eq.' + id, select: 'locked,lock_reason', limit: '1' });
+    lockRow = locks?.[0] || null;
+  } catch { lockRow = null; }
   const a = rows[0];
   if (!a) { main.innerHTML = '<div class="empty">Asset not found. <a href="#/assets">Back to assets</a></div>'; return; }
   loadAssets().catch(() => {});   // for suggestions in action forms
@@ -111,6 +116,7 @@ export async function assetView(main, params, id) {
         <button class="btn danger" id="del">${icon('trash')} Delete</button>
       </div>
     </div>
+    ${lockRow?.locked ? `<div class="err" style="margin-bottom:16px"><strong>Locked by IT.</strong> ${esc(lockRow.lock_reason || 'This asset should not be used until an admin unlocks it in Control.')}</div>` : ''}
     <div class="grid-3">
       <div class="stack">
         <div class="card"><div class="card-b actions">
@@ -203,6 +209,10 @@ export async function assetView(main, params, id) {
     </div>`;
 
   main.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
+    if (b.dataset.act === 'check_out' && lockRow?.locked) {
+      toast('This asset is locked. Unlock it in Control before checking it out.', true);
+      return;
+    }
     if (await runAction(b.dataset.act, a)) {
       invalidate();
       toast(`${ACTION_LABEL[b.dataset.act] || 'Saved'} — ${a.tag}`);
