@@ -140,6 +140,8 @@ const ui = {
   queueReady: true,
   requests: [],
   activity: [],
+  agents: [],
+  agentReady: true,
   source: 'db',
   wide: true,
   controls: new Map(),
@@ -359,6 +361,22 @@ function connectionText(asset, c) {
   return c.connection === 'enrolled' ? 'Enrolled' : 'Not enrolled';
 }
 
+async function loadAgents() {
+  ui.agents = [];
+  ui.agentReady = true;
+  if (ui.source !== 'db') { ui.agentReady = false; return; }
+  try {
+    ui.agents = await store.db.selectAll('agent_devices', { select: 'asset_id,hostname,windows_user,last_seen,created_at', order: 'last_seen.desc' });
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+    ui.agentReady = false;
+  }
+}
+
+function agentFor(assetId) {
+  return (ui.agents || []).find(a => a.asset_id === assetId) || null;
+}
+
 function pending() {
   return ui.requests.filter(r => r.status === 'pending');
 }
@@ -439,7 +457,7 @@ function watchRequests(main) {
   pollTimer = setInterval(async () => {
     if (gen !== pollGen || !main.querySelector('#control-live') || document.querySelector('.modal-bg')) return;
     const seen = new Set(pending().map(r => String(r.id)));
-    try { await loadQueues(); } catch { return; }
+    try { await loadQueues(); await loadAgents(); } catch { return; }
     if (pending().some(r => !seen.has(String(r.id)))) {
       ui.showPopup = true;
       paint(main);
@@ -454,6 +472,7 @@ export async function controlView(main) {
     ui.assets = assets.filter(a => a.status !== 'disposed').sort((a, b) => (a.tag || '').localeCompare(b.tag || ''));
     await loadControls();
     await loadQueues();
+    await loadAgents();
     if (pending().length) ui.showPopup = true;
   } catch (err) {
     main.innerHTML = `<div class="page-head"><div><h1>Control</h1></div></div><div class="err">${esc(err.message || String(err))}</div>`;
@@ -488,13 +507,12 @@ function paint(main) {
       <button type="button" class="btn ${pending().length ? 'primary' : ''}" id="open-requests">Admin requests (${pending().length})</button>
     </div>
     <div class="note" style="margin-bottom:16px">
-      <strong>How a device gets connected.</strong>
-      A laptop or desktop is connected when the person enrolls it in Microsoft Intune (Windows) or Jamf (Mac). They can see that enrollment.
+      <strong>How a computer gets connected.</strong>
+      Install <a href="/agent/">Mulk Agent</a> on the Windows laptop or desktop. It is a separate program, and Intune is not required. The person sees a window named Mulk Agent.
       A printer is connected when you add its queue on the company print server.
-      A phone is connected when the person installs the company management profile.
+      A phone stays on the company management profile if you use one later.
       Monitors and other items stay under this register: who has them, where they are, and whether they are on hold.
-      Saving a decision here does not change the device until that enrollment exists. This page does not record keystrokes, screenshots, or location.
-      There is no agent file to download from this site. On a Windows laptop or desktop, install <strong>Company Portal</strong> from the Microsoft Store, published by Microsoft, then sign in with the company account. On a Mac, install <strong>Company Portal</strong> from the App Store, or use the Jamf enrollment your Microsoft or Jamf admin sends. Company Portal appears when the company subscription includes Intune, which you confirm in the Microsoft 365 admin center under Billing.
+      This page does not record keystrokes, screenshots, or location.
     </div>
     ${ui.source === 'local' ? `
       <div class="err" style="margin-bottom:16px">
@@ -621,8 +639,8 @@ function steps(kind) {
     return [
       'Match the serial number on the computer to this asset tag.',
       'The person signs in with their company account.',
-      'Windows: install Company Portal from the Microsoft Store and sign in with the company account. Or use Settings, Accounts, Access work or school, Connect. Mac: install Company Portal from the App Store, or open the Jamf enrollment IT sends. The person can see this. It is not hidden.',
-      'Return here and choose Mark enrolled. Until then, the buttons below only save the decision. They do not change the computer.',
+      'In Control, create a Mulk Agent code for this computer. On the computer, run the install command from the Mulk Agent page as Administrator and enter that code. The Mulk Agent window stays visible.',
+      'When the code is accepted, this computer shows as enrolled and Mulk Agent starts applying the rules. Until then, buttons here only save the decision.',
     ];
   }
   if (kind === 'printer') {
@@ -672,6 +690,16 @@ function detail(a) {
         </div>` : ''}
       </div>
       ${computer ? `<div>
+        <h2 style="margin-bottom:8px">Mulk Agent</h2>
+        <p class="muted" style="margin:0 0 10px">${agentFor(a.id)
+          ? `Installed on ${esc(agentFor(a.id).hostname || 'this computer')} for ${esc(agentFor(a.id).windows_user || 'its Windows account')}. Last seen ${esc(fmtDateTime(agentFor(a.id).last_seen) || 'not yet')}.`
+          : 'Not installed yet. Create a code, then run the installer on that computer as Administrator.'}</p>
+        <div class="row">
+          <button type="button" class="btn sm primary" data-act="agent-code">Create Mulk Agent code</button>
+          <a class="btn sm" href="/agent/" target="_blank" rel="noopener">Install steps</a>
+        </div>
+      </div>
+      <div>
         <h2 style="margin-bottom:8px">Admin rights</h2>
         <p class="muted" style="margin:0 0 10px">Standard user is the default. A timed window ends on its own. Standing admin needs a written reason and stays until you revoke it. A hold does not wipe the computer.</p>
         <div class="row">
@@ -782,6 +810,8 @@ async function act(main, asset, kind) {
       await save(main, asset, { ...current(asset), hold: true, hold_reason: reason }, 'hold', `Placed on hold: ${reason}`);
     } else if (kind === 'release') {
       await save(main, asset, { ...c, hold: false, hold_reason: null }, 'hold', 'Hold released');
+    } else if (kind === 'agent-code') {
+      await askForAgentCode(asset);
     } else if (kind === 'request') {
       await askForAdmin(main, asset);
     } else if (kind === 'copy') {
@@ -859,6 +889,23 @@ async function denyRequest(main, id) {
     toast('Request denied');
     paint(main);
   } catch (err) { toast(err.message || String(err), true); }
+}
+
+async function askForAgentCode(asset) {
+  const code = await store.db.rpc('agent_create_code', { p_asset_id: asset.id });
+  const text = String(code || '').replace(/^"|"$/g, '');
+  const command = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://mulk-asset-manager.vercel.app/agent/install.ps1 | iex"';
+  await modal({
+    title: 'Mulk Agent code',
+    submit: 'Copy code and command',
+    cancel: 'Close',
+    body: `<p style="margin:0">On that Windows computer, open PowerShell as Administrator, run the command, and type this code. It works once and expires in 24 hours.</p>
+      <p class="mono" style="font-size:28px;letter-spacing:.18em;margin:12px 0">${esc(text)}</p>
+      <p class="mono" style="margin:0">${esc(command)}</p>
+      <p class="muted" style="margin:8px 0 0">The installer page is <a href="/agent/" target="_blank" rel="noopener">/agent/</a>. If creating a code fails, run supabase/agent.sql in the Supabase SQL editor. Run supabase/laptop-control.sql first if you have not.</p>`,
+    async onSubmit() { await navigator.clipboard.writeText(text + '\n' + command); },
+  });
+  toast('Install code created');
 }
 
 async function askForAdmin(main, asset) {

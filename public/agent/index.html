@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mulk Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono&display=swap" rel="stylesheet">
+  <style>
+    :root { color-scheme: light; --ink: #141820; --muted: #5c6570; --line: #e2e5ea; --accent: #0e5e56; --bg: #f4f5f7; --panel: #fff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 16px/1.5 "IBM Plex Sans", sans-serif; background: var(--bg); color: var(--ink); }
+    main { max-width: 720px; margin: 0 auto; padding: 40px 20px 64px; }
+    h1 { font-size: 32px; margin: 0 0 8px; }
+    h2 { font-size: 18px; margin: 28px 0 8px; }
+    p, li { color: var(--ink); }
+    .muted { color: var(--muted); }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-top: 16px; }
+    code, pre { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; }
+    pre { white-space: pre-wrap; background: #f4f5f7; border-radius: 8px; padding: 12px; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Mulk Agent</h1>
+    <p class="muted">The company program for a Windows laptop or desktop. It is a separate install from the asset register. Intune is not required.</p>
+    <div class="card">
+      <p>The window stays on the computer with the name Mulk Agent. The person can read the rules. They can ask for admin rights. IT approves or denies that request in Control. A short approval adds that Windows account to Administrators and removes it when the time ends. USB storage follows the rule set. The program does not record keystrokes, screenshots, or file contents.</p>
+    </div>
+    <h2>Install on one computer</h2>
+    <ol>
+      <li>In the asset app, open <strong>Control</strong>, select the laptop or desktop, and choose <strong>Create Mulk Agent code</strong>. If that button says the database is not ready, run <code>supabase/agent.sql</code> once in the Supabase SQL editor. Run <code>supabase/laptop-control.sql</code> first if you have not already.</li>
+      <li>On the computer, open PowerShell as Administrator and run:</li>
+    </ol>
+    <pre>powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://mulk-asset-manager.vercel.app/agent/install.ps1 | iex"</pre>
+    <ol start="3">
+      <li>Type the 8 character code. Confirm the Windows account of the person who uses that computer.</li>
+      <li>Leave the Mulk Agent window available. It also opens at the next sign-in.</li>
+    </ol>
+    <h2>Remove it</h2>
+    <p>In an Administrator PowerShell:</p>
+    <pre>schtasks /Delete /TN "Mulk Agent Enforce" /F
+Remove-Item "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\Mulk Agent.lnk" -Force
+Remove-Item "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Mulk Agent.lnk" -Force
+Remove-Item C:\ProgramData\MulkAgent -Recurse -Force</pre>
+    <p class="muted">Mac computers are not covered by this installer.</p>
+  </main>
+</body>
+</html>
