@@ -16,6 +16,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Root = 'C:\ProgramData\MulkAgent'
+$AgentFile = Join-Path $Root 'MulkAgent.ps1'
 $ConfigPath = Join-Path $Root 'device.json'
 $LogPath = Join-Path $Root 'agent.log'
 $MarkerPath = Join-Path $Root 'granted-admin.txt'
@@ -25,7 +26,66 @@ function Write-AgentLog([string]$Message) {
   try {
     $line = '{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $Message
     Add-Content -Path $LogPath -Value $line -Encoding UTF8
+    $item = Get-Item -Path $LogPath -ErrorAction SilentlyContinue
+    if ($item -and $item.Length -gt 262144) {
+      $tail = @(Get-Content -Path $LogPath -Tail 80 -ErrorAction SilentlyContinue)
+      Set-Content -Path $LogPath -Value $tail -Encoding UTF8
+    }
   } catch { }
+}
+
+function Test-Due([string]$Name, [int]$Minutes) {
+  $path = Join-Path $Root ($Name + '.stamp')
+  if (-not (Test-Path -Path $path)) { return $true }
+  $age = (Get-Date) - (Get-Item -Path $path).LastWriteTime
+  return ($age.TotalMinutes -ge $Minutes)
+}
+
+function Mark-Done([string]$Name) {
+  Set-Content -Path (Join-Path $Root ($Name + '.stamp')) -Value (Get-Date -Format 'o') -Encoding ASCII
+}
+
+function Protect-AgentStore([string]$EnrolledUser) {
+  if (-not (Test-Path -Path $Root)) { return }
+  $system = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')).Translate([System.Security.Principal.NTAccount])
+  $admins = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')).Translate([System.Security.Principal.NTAccount])
+  $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+  $none = [System.Security.AccessControl.PropagationFlags]::None
+  $dir = Get-Acl -Path $Root
+  $dir.SetAccessRuleProtection($true, $false)
+  foreach ($rule in @($dir.Access)) { [void]$dir.RemoveAccessRule($rule) }
+  $dir.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($system, 'FullControl', $inherit, $none, 'Allow')))
+  $dir.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($admins, 'FullControl', $inherit, $none, 'Allow')))
+  $creator = (New-Object System.Security.Principal.SecurityIdentifier('S-1-3-0')).Translate([System.Security.Principal.NTAccount])
+  $dir.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($creator, 'Modify', $inherit, 'InheritOnly', 'Allow')))
+  $person = $null
+  if ($EnrolledUser) {
+    try { $person = New-Object System.Security.Principal.NTAccount($EnrolledUser) } catch { $person = $null }
+  }
+  if (-not $person) {
+    $person = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')).Translate([System.Security.Principal.NTAccount])
+  }
+  $dir.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($person, 'ReadAndExecute, CreateFiles, CreateDirectories, ReadAttributes, WriteAttributes, Synchronize', $inherit, $none, 'Allow')))
+  Set-Acl -Path $Root -AclObject $dir
+  foreach ($file in @($AgentFile, $ConfigPath)) {
+    if (-not (Test-Path -Path $file)) { continue }
+    $acl = Get-Acl -Path $file
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($system, 'FullControl', 'Allow')))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($admins, 'FullControl', 'Allow')))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($person, 'ReadAndExecute', 'Allow')))
+    Set-Acl -Path $file -AclObject $acl
+  }
+  if (Test-Path -Path $LogPath) {
+    $acl = Get-Acl -Path $LogPath
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($system, 'FullControl', 'Allow')))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($admins, 'FullControl', 'Allow')))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($person, 'ReadAndExecute, AppendData, WriteAttributes', 'Allow')))
+    Set-Acl -Path $LogPath -AclObject $acl
+  }
 }
 
 function Get-AgentConfig {
@@ -731,9 +791,9 @@ function Ensure-SampleTask {
   try { $user = [string](Get-AgentConfig).windows_user } catch { return }
   if (-not $user) { return }
   $tr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Sample'
-  & schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 1 /RU $user /IT /RL LIMITED /TR $tr /F | Out-Null
+  & schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 5 /RU $user /IT /RL LIMITED /TR $tr /F | Out-Null
   if ($LASTEXITCODE -ne 0) {
-    Write-AgentLog 'The one-minute activity sample could not be scheduled. Leave the Mulk Agent window open so active time is still counted.'
+    Write-AgentLog 'The activity sample could not be scheduled. Leave the Mulk Agent window open so active time is still counted.'
   }
 }
 
@@ -887,13 +947,14 @@ function Invoke-PendingInstall($Config) {
   $file = $null
   try {
     if ($url -notmatch '^https://') { throw 'The installer link is not https.' }
+    if ($url -match '^https://[^/\s]*@') { throw 'The installer link cannot contain a password.' }
     $ext = [IO.Path]::GetExtension(([uri]$url).AbsolutePath).ToLowerInvariant()
     if ($ext -notin @('.msi', '.exe')) { throw 'Only an MSI or EXE installer is accepted.' }
     if ($extra -match '[;&|`$<>]') { throw 'The silent arguments contain a character that is not allowed.' }
     $dir = Join-Path $Root 'installs'
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $file = Join-Path $dir ([guid]::NewGuid().ToString('N') + $ext)
-    Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing -TimeoutSec 900
+    Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing -TimeoutSec 900 -MaximumRedirection 0
     $len = (Get-Item -Path $file).Length
     if ($len -lt 1024) { throw 'The download is too small to be an installer.' }
     if ($len -gt 700MB) { throw 'The installer is larger than 700 MB.' }
@@ -1257,9 +1318,9 @@ function Sync-AssetLock($policy) {
 
 function Ensure-WatchTask {
   $tr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Watch'
-  & schtasks.exe /Create /TN 'Mulk Agent Watch' /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /TR $tr /F | Out-Null
+  & schtasks.exe /Create /TN 'Mulk Agent Watch' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR $tr /F | Out-Null
   if ($LASTEXITCODE -ne 0) {
-    Write-AgentLog 'The one-minute dashboard check could not be scheduled. The five-minute check still runs.'
+    Write-AgentLog 'The dashboard check could not be scheduled. The five-minute check still runs.'
   }
 }
 
@@ -1350,6 +1411,7 @@ function Invoke-Enforce {
   $user = [string]$policy.windows_user
   if (-not $user) { $user = [string]$config.windows_user }
   $locked = [bool]$policy.locked
+  try { Protect-AgentStore $user } catch { Write-AgentLog ('Could not tighten the agent folder permissions.') }
   try { Sync-AssetLock $policy } catch { Write-AgentLog ('Sign-in lock failed: ' + $_.Exception.Message) }
   try { Ensure-WatchTask } catch { Write-AgentLog ('Dashboard check schedule failed: ' + $_.Exception.Message) }
   $grant = ($policy.admin -eq 'elevated' -or $policy.admin -eq 'standing') -and -not [bool]$policy.hold -and -not $locked
@@ -1358,14 +1420,18 @@ function Invoke-Enforce {
   if ([bool]$policy.hold -or $locked) { $usb = 'block' }
   if ($usb -notin @('block', 'read', 'allow')) { $usb = 'block' }
   Set-UsbPolicy $usb
-  try { Send-SoftwareInventory $config } catch { Write-AgentLog ("Software report failed: " + $_.Exception.Message) }
-  try { Send-Health $config } catch { Write-AgentLog ("Health report failed: " + $_.Exception.Message) }
   try { Apply-PendingAdminPassword $config } catch { Write-AgentLog 'Password change failed before it could be confirmed. The password is not written here.' }
   try { Invoke-PendingInstall $config } catch { Write-AgentLog ("Install failed: " + $_.Exception.Message) }
-  try { Send-UsbNotices $config $policy } catch { Write-AgentLog ("USB report failed: " + $_.Exception.Message) }
   try { Send-Presence $config } catch { Write-AgentLog ("Location report failed: " + $_.Exception.Message) }
   try { Ensure-SampleTask } catch { Write-AgentLog ("Activity schedule failed: " + $_.Exception.Message) }
-  try { Send-Usage $config } catch { Write-AgentLog ("Usage report failed: " + $_.Exception.Message) }
+  if (Test-Due 'inventory' 30) {
+    $heavyOk = $true
+    try { Send-SoftwareInventory $config } catch { $heavyOk = $false; Write-AgentLog ("Software report failed: " + $_.Exception.Message) }
+    try { Send-Health $config } catch { $heavyOk = $false; Write-AgentLog ("Health report failed: " + $_.Exception.Message) }
+    try { Send-UsbNotices $config $policy } catch { $heavyOk = $false; Write-AgentLog ("USB report failed: " + $_.Exception.Message) }
+    try { Send-Usage $config } catch { $heavyOk = $false; Write-AgentLog ("Usage report failed: " + $_.Exception.Message) }
+    if ($heavyOk) { Mark-Done 'inventory' }
+  }
   $summary = if ($locked) {
     'Locked by IT. Sign-in is blocked until unlock. Wi-Fi and Ethernet stay on. ' + [string]$policy.lock_reason
   } elseif ([bool]$policy.hold) {
@@ -1589,7 +1655,7 @@ $script:sessionLocked = $false
 $script:lockSigningOut = $false
 $script:supportPrompt = $false
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 60000
+$timer.Interval = 300000
 $timer.Add_Tick({
   try { Add-ActivitySample } catch { }
   try { Ask-RemoteApproval } catch { }
