@@ -3,7 +3,7 @@
 # It reports installed programs, USB devices, the public IP city/country,
 # web searches, active time, and which app is in front.
 # It does not record keystrokes, screenshots, documents, page contents, or GPS.
-# A lock blocks Windows sign-in until IT unlocks it. Wi-Fi and Ethernet stay on.
+# Sign-in lock is no longer used. If an older copy blocked sign-in, this copy removes that block.
 # IT can ask to open Windows Quick Assist. The person must choose Allow first.
 # A computer still running after 6:00 PM reminds the person, the next time they
 # use it, to shut down when leaving. Office hours are 8:00 AM to 6:00 PM.
@@ -1275,45 +1275,14 @@ function Set-LockNotice([bool]$Locked, [string]$Reason) {
 }
 
 function Sync-AssetLock($policy) {
-  $locked = [bool]$policy.locked
-  $reason = [string]$policy.lock_reason
-  $user = [string]$policy.windows_user
-  if ($locked) {
-    Enable-CompanyNetwork
-    Set-LockNotice $true $reason
-    $existing = Read-LockFlag
-    if ($existing) {
-      Deny-InteractiveLogon | Out-Null
-      if (-not $existing.rights -or @($existing.rights).Count -eq 0) {
-        $existing.rights = @(
-          'S-1-1-0|SeDenyInteractiveLogonRight',
-          'S-1-1-0|SeDenyRemoteInteractiveLogonRight'
-        )
-        Write-LockFlag $existing.account $existing.rights
-      }
-      if ($existing.account) { Set-EnrolledLocalAccount $existing.account $false | Out-Null }
-    } else {
-      $added = @(Deny-InteractiveLogon)
-      $account = ''
-      if (Set-EnrolledLocalAccount $user $false) { $account = Get-LocalLogonName $user }
-      Write-LockFlag $account $added
-      Write-AgentLog 'Sign-in is blocked until IT unlocks this computer. Wi-Fi and Ethernet stay enabled so it can keep reaching the dashboard.'
-    }
-    Stop-UserSessions
-    & schtasks.exe /Delete /TN 'Mulk Agent Lock' /F 2>$null | Out-Null
-    return
-  }
+  Set-LockNotice $false ''
   $existing = Read-LockFlag
-  if (-not $existing) {
-    Set-LockNotice $false ''
-    return
-  }
+  if (-not $existing) { return }
   Allow-InteractiveLogon $existing.rights
   if ($existing.account) { Set-EnrolledLocalAccount $existing.account $true | Out-Null }
-  Set-LockNotice $false ''
   Remove-Item -Path $LockFlag -Force -ErrorAction SilentlyContinue
   & schtasks.exe /Delete /TN 'Mulk Agent Lock' /F 2>$null | Out-Null
-  Write-AgentLog 'IT unlocked this computer. Sign-in is allowed again.'
+  Write-AgentLog 'Sign-in lock was removed. This computer no longer blocks sign-in.'
 }
 
 function Ensure-WatchTask {
@@ -1335,7 +1304,6 @@ function Ask-RemoteApproval {
   $config = Get-AgentConfig
   try {
     $policy = Get-Policy $config
-    if ([bool]$policy.locked) { return }
   } catch { return }
   $job = Invoke-AgentRpc $config 'agent_take_support' @{ p_token = [string]$config.token }
   if (-not $job -or -not $job.id) { return }
@@ -1385,23 +1353,15 @@ function Ask-RemoteApproval {
 function Invoke-Watch {
   $config = $null
   try { $config = Get-AgentConfig } catch {
-    Write-AgentLog ('Lock watch could not read this computer: ' + $_.Exception.Message)
+    Write-AgentLog ('Dashboard check could not read this computer: ' + $_.Exception.Message)
     return
   }
+  try { Sync-AssetLock $null } catch { Write-AgentLog 'Could not clear an old sign-in lock.' }
   try {
-    $policy = Get-Policy $config
-    Sync-AssetLock $policy
-    if (-not [bool]$policy.locked) {
-      try { Update-LeftOnSystem $config } catch { Write-AgentLog ('Shutdown reminder failed: ' + $_.Exception.Message) }
-    }
+    Get-Policy $config | Out-Null
+    try { Update-LeftOnSystem $config } catch { Write-AgentLog ('Shutdown reminder failed: ' + $_.Exception.Message) }
   } catch {
-    if (Test-Path $LockFlag) {
-      try { Enable-CompanyNetwork } catch { }
-      try { Deny-InteractiveLogon | Out-Null } catch { }
-      Write-AgentLog 'Dashboard was not reached. Sign-in stays blocked, and Wi-Fi and Ethernet stay on.'
-    } else {
-      Write-AgentLog ('Lock watch could not reach the dashboard: ' + $_.Exception.Message)
-    }
+    Write-AgentLog ('Dashboard check could not reach the dashboard: ' + $_.Exception.Message)
   }
 }
 
@@ -1410,14 +1370,13 @@ function Invoke-Enforce {
   $policy = Get-Policy $config
   $user = [string]$policy.windows_user
   if (-not $user) { $user = [string]$config.windows_user }
-  $locked = [bool]$policy.locked
   try { Protect-AgentStore $user } catch { Write-AgentLog ('Could not tighten the agent folder permissions.') }
-  try { Sync-AssetLock $policy } catch { Write-AgentLog ('Sign-in lock failed: ' + $_.Exception.Message) }
+  try { Sync-AssetLock $policy } catch { Write-AgentLog 'Could not clear an old sign-in lock.' }
   try { Ensure-WatchTask } catch { Write-AgentLog ('Dashboard check schedule failed: ' + $_.Exception.Message) }
-  $grant = ($policy.admin -eq 'elevated' -or $policy.admin -eq 'standing') -and -not [bool]$policy.hold -and -not $locked
+  $grant = ($policy.admin -eq 'elevated' -or $policy.admin -eq 'standing') -and -not [bool]$policy.hold
   Set-LocalAdmin $user $grant
   $usb = [string]$policy.usb
-  if ([bool]$policy.hold -or $locked) { $usb = 'block' }
+  if ([bool]$policy.hold) { $usb = 'block' }
   if ($usb -notin @('block', 'read', 'allow')) { $usb = 'block' }
   Set-UsbPolicy $usb
   try { Apply-PendingAdminPassword $config } catch { Write-AgentLog 'Password change failed before it could be confirmed. The password is not written here.' }
@@ -1432,9 +1391,7 @@ function Invoke-Enforce {
     try { Send-Usage $config } catch { $heavyOk = $false; Write-AgentLog ("Usage report failed: " + $_.Exception.Message) }
     if ($heavyOk) { Mark-Done 'inventory' }
   }
-  $summary = if ($locked) {
-    'Locked by IT. Sign-in is blocked until unlock. Wi-Fi and Ethernet stay on. ' + [string]$policy.lock_reason
-  } elseif ([bool]$policy.hold) {
+  $summary = if ([bool]$policy.hold) {
     'On hold. Admin rights are off and USB storage is blocked.'
   } elseif ($policy.admin -eq 'standing') {
     'Standing admin is on.'
@@ -1461,10 +1418,6 @@ if ($Watch) {
 }
 
 if ($Sample) {
-  try {
-    $samplePolicy = Get-Policy (Get-AgentConfig)
-    if ([bool]$samplePolicy.locked) { & "$env:SystemRoot\System32\logoff.exe" }
-  } catch { }
   try { Ask-RemoteApproval } catch { Write-AgentLog ('Remote support failed: ' + $_.Exception.Message) }
   try { Add-ActivitySample } catch {
     Write-AgentLog ("Activity sample failed: " + $_.Exception.Message)
@@ -1495,7 +1448,7 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock blocks sign-in until IT unlocks it. Wi-Fi and Ethernet stay on. If this computer is left running after office hours, 8:00 AM to 6:00 PM, you will be reminded to shut it down the next time you use it. If you ask for remote help, IT can connect only after you choose Allow. Quick Assist then opens on this screen. The screen is not saved. It does not read files, capture the screen, record the keyboard, or use GPS.'
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can set the local Administrator password once. A company installer runs only when IT sends it to several computers from Bulk install. It does not lock sign-in. If this computer is left running after office hours, 8:00 AM to 6:00 PM, you will be reminded to shut it down the next time you use it. If you ask for remote help, IT can connect only after you choose Allow. Quick Assist then opens on this screen. The screen is not saved. It does not read files, capture the screen, record the keyboard, or use GPS.'
 $intro.Size = New-Object System.Drawing.Size(460, 156)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
@@ -1586,15 +1539,7 @@ function Update-Window {
       'elevated' { 'Temporary admin until ' + [string]$policy.elevation_ends_at }
       default { 'Standard user' }
     }
-    $script:sessionLocked = [bool]$policy.locked
-    if ($script:sessionLocked -and -not $script:lockSigningOut) {
-      $script:lockSigningOut = $true
-      [System.Windows.Forms.MessageBox]::Show('This computer is locked by IT. You cannot sign in again until an administrator unlocks it. Wi-Fi and Ethernet stay connected.', 'Mulk Agent')
-      & "$env:SystemRoot\System32\logoff.exe"
-    }
-    $holdText = if ($script:sessionLocked) { 'Locked by IT. Sign-in stays blocked until unlock. ' + [string]$policy.lock_reason }
-      elseif ([bool]$policy.hold) { 'On hold. ' + [string]$policy.hold_reason }
-      else { 'Not locked' }
+    $holdText = if ([bool]$policy.hold) { 'On hold. ' + [string]$policy.hold_reason } else { 'Not on hold' }
     $network = 'Network location is sent to IT.'
     $cache = Join-Path $Root 'presence-cache.json'
     if (Test-Path $cache) {
@@ -1651,8 +1596,6 @@ $help.Add_Click({
     [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Mulk Agent')
   }
 })
-$script:sessionLocked = $false
-$script:lockSigningOut = $false
 $script:supportPrompt = $false
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 300000

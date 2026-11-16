@@ -19,11 +19,14 @@ export async function importView(main) {
       <div id="preview"></div>
     </div>`;
 
-  $('#tpl').onclick = () => exportSheets([{ name: 'Assets', rows: [{
+  $('#tpl').onclick = async () => {
+    try { await exportSheets([{ name: 'Assets', rows: [{
     'Asset Tag ID': 'MH/LAP/2026/HZF/114', 'Description': 'Laptop', 'Brand': 'Lenovo', 'Status': 'Available', 'Model': 'ThinkPad E14',
     'Serial No': 'PF123456', 'Site': 'HO', 'Assigned to': '', 'Location': 'Hamariyah', 'Category': 'Laptop', 'Department': '',
     'Configuration': 'i7/16GB/512GB', 'Purchase Date': '2026-10-01', 'Purchase Cost': 3200, 'Vendor': '', 'Warranty Expiry': '2029-10-01', 'Notes': '',
-  }] }], 'asset-import-template.xlsx');
+  }] }], 'asset-import-template.xlsx'); }
+    catch (e) { toast(e.message, true); }
+  };
 
   const drop = $('#drop');
   drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
@@ -34,7 +37,7 @@ export async function importView(main) {
   async function handle(file) {
     const box = $('#preview');
     let parsed;
-    try { parsed = parseWorkbook(await file.arrayBuffer()); }
+    try { parsed = await parseWorkbook(await file.arrayBuffer()); }
     catch (e) { box.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
     const { rows, warnings, unmapped } = parsed;
     const existing = new Set(assets.map(a => a.tag.toLowerCase()));

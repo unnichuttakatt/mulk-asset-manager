@@ -15,42 +15,27 @@ function bars(entries, field, max = 8) {
     </a>`).join('')}</div>`;
 }
 
+async function optionalRows(query) {
+  try { return await query() || []; }
+  catch { return []; }
+}
+
 export async function dashboardView(main) {
-  const [assets, events] = await Promise.all([
-    loadAssets(true),
+  const [assets, events, software, copies, away, compliance, devices, help] = await Promise.all([
+    loadAssets(),
     store.db.select('asset_events', { select: 'id,action,event_date,assigned_to,created_at,performed_by,notes,asset_id,assets(tag,description)', order: 'created_at.desc', limit: '12' }),
-  ]);
-  let software = [];
-  let copies = [];
-  let away = [];
-  let compliance = [];
-  let devices = [];
-  let locked = [];
-  try {
-    [software, copies, away] = await Promise.all([
-      store.db.select('software_events', { select: 'id,asset_id,name,kind,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }),
-      store.db.select('copy_activity', { select: 'id,asset_id,channel,file_name,action,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }),
-      store.db.select('agent_devices', { select: 'asset_id,public_ip,city,country_name,country_code,location_at', outside_uae: 'eq.true', order: 'location_at.desc', limit: '8' }),
-    ]);
-  } catch { software = []; copies = []; away = []; }
-  try {
-    compliance = await store.db.select('compliance_alerts', { select: 'id,asset_id,kind,detail,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }) || [];
-  } catch { compliance = []; }
-  try {
-    devices = await store.db.select('agent_devices', { select: 'asset_id,hostname,last_seen', order: 'last_seen.asc', limit: '200' }) || [];
-  } catch { devices = []; }
-  try {
-    locked = await store.db.select('laptop_controls', { select: 'asset_id,lock_reason', locked: 'eq.true', limit: '8' }) || [];
-  } catch { locked = []; }
-  let help = [];
-  try {
-    help = await store.db.select('support_sessions', {
+    optionalRows(() => store.db.select('software_events', { select: 'id,asset_id,name,kind,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' })),
+    optionalRows(() => store.db.select('copy_activity', { select: 'id,asset_id,channel,file_name,action,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' })),
+    optionalRows(() => store.db.select('agent_devices', { select: 'asset_id,public_ip,city,country_name,country_code,location_at', outside_uae: 'eq.true', order: 'location_at.desc', limit: '8' })),
+    optionalRows(() => store.db.select('compliance_alerts', { select: 'id,asset_id,kind,detail,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' })),
+    optionalRows(() => store.db.select('agent_devices', { select: 'asset_id,hostname,last_seen', order: 'last_seen.asc', limit: '200' })),
+    optionalRows(() => store.db.select('support_sessions', {
       select: 'id,asset_id,status,requested_by,reason,detail,requested_at',
       status: 'in.(requested,pending,asking)',
       order: 'requested_at.desc',
       limit: '12',
-    }) || [];
-  } catch { help = []; }
+    })),
+  ]);
   const helpLabel = { requested: 'Asked for help', pending: 'Waiting for them to allow', asking: 'Allow prompt is on their screen' };
   const quietCutoff = Date.now() - 24 * 3600 * 1000;
   const offline = devices.filter(d => !d.last_seen || new Date(d.last_seen).getTime() < quietCutoff);
@@ -146,17 +131,6 @@ export async function dashboardView(main) {
           }).join('')}
         </tbody></table></div>` : '<div class="empty">No open data-leaving reports. A removable drive is reported by its letter and volume name.</div>'}
       </div>
-    </div>
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-h"><h2>Locked by IT</h2><a href="#/control">${locked.length ? locked.length + ' locked' : 'Control'}</a></div>
-      ${locked.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>
-        ${locked.map(r => {
-          const asset = assets.find(a => a.id === r.asset_id);
-          return `<tr class="clickable" data-href="#/control">
-            <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.lock_reason || '')}</div></td>
-          </tr>`;
-        }).join('')}
-      </tbody></table></div>` : '<div class="empty">No asset is locked. In Control, Lock asset stops sign-in until you unlock it. Wi-Fi and Ethernet stay connected.</div>'}
     </div>
     <div class="grid-2" style="margin-bottom:16px">
       <div class="card">

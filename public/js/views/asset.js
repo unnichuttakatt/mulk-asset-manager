@@ -1,4 +1,4 @@
-import { esc, icon, toast, modal, fmtDate, fmtDateTime, fmtMoney, today, datalist, qrSvg, $ } from '../ui.js';
+import { esc, icon, toast, modal, fmtDate, fmtDateTime, fmtMoney, today, datalist, qrSvg, ensureQr, $ } from '../ui.js';
 import { store, loadAssets, invalidate, distinct, suggestTag, STATUS, ACTIONS_FOR, ACTION_BUTTON, ACTION_LABEL } from '../data.js';
 import { setLabelSelection } from './assets.js';
 
@@ -57,42 +57,26 @@ export async function assetView(main, params, id) {
     store.db.select('assets', { id: 'eq.' + id, select: '*' }),
     store.db.select('asset_events', { asset_id: 'eq.' + id, select: '*', order: 'created_at.desc' }),
   ]);
-  let programs = [];
-  let devices = [];
-  let usageDays = [];
-  let searches = [];
-  let health = [];
-  let lockRow = null;
-  try {
-    devices = await store.db.select('agent_devices', {
+  const quiet = async (query) => { try { return await query() || []; } catch { return []; } };
+  const [devices, usageDays, searches, programs, health] = await Promise.all([
+    quiet(() => store.db.select('agent_devices', {
       asset_id: 'eq.' + id,
       select: 'hostname,public_ip,local_ip,country_code,country_name,city,outside_uae,location_at,last_seen',
       order: 'last_seen.desc',
       limit: '3',
-    }) || [];
-  } catch { devices = []; }
-  try {
-    [usageDays, searches] = await Promise.all([
-      store.db.select('device_days', { asset_id: 'eq.' + id, select: 'activity_date,active_seconds', order: 'activity_date.desc', limit: '7' }),
-      store.db.select('web_searches', { asset_id: 'eq.' + id, select: 'query,engine,searched_at', order: 'searched_at.desc', limit: '8' }),
-    ]);
-  } catch { usageDays = []; searches = []; }
-  try {
-    programs = await store.db.select('installed_software', {
+    })),
+    quiet(() => store.db.select('device_days', { asset_id: 'eq.' + id, select: 'activity_date,active_seconds', order: 'activity_date.desc', limit: '7' })),
+    quiet(() => store.db.select('web_searches', { asset_id: 'eq.' + id, select: 'query,engine,searched_at', order: 'searched_at.desc', limit: '8' })),
+    quiet(() => store.db.select('installed_software', {
       asset_id: 'eq.' + id,
       removed_at: 'is.null',
       select: 'name,version,publisher,installed_on,last_seen',
       order: 'name.asc',
-      limit: '500',
-    }) || [];
-  } catch { programs = []; }
-  try {
-    health = await store.db.select('device_health', { asset_id: 'eq.' + id, select: '*', limit: '1' }) || [];
-  } catch { health = []; }
-  try {
-    const locks = await store.db.select('laptop_controls', { asset_id: 'eq.' + id, select: 'locked,lock_reason', limit: '1' });
-    lockRow = locks?.[0] || null;
-  } catch { lockRow = null; }
+      limit: '200',
+    })),
+    quiet(() => store.db.select('device_health', { asset_id: 'eq.' + id, select: '*', limit: '1' })),
+    ensureQr().catch(() => {}),
+  ]);
   const a = rows[0];
   if (!a) { main.innerHTML = '<div class="empty">Asset not found. <a href="#/assets">Back to assets</a></div>'; return; }
   loadAssets().catch(() => {});   // for suggestions in action forms
@@ -116,7 +100,6 @@ export async function assetView(main, params, id) {
         <button class="btn danger" id="del">${icon('trash')} Delete</button>
       </div>
     </div>
-    ${lockRow?.locked ? `<div class="err" style="margin-bottom:16px"><strong>Locked by IT.</strong> ${esc(lockRow.lock_reason || 'This asset should not be used until an admin unlocks it in Control.')}</div>` : ''}
     <div class="grid-3">
       <div class="stack">
         <div class="card"><div class="card-b actions">

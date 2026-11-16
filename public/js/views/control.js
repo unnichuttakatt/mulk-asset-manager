@@ -375,7 +375,6 @@ function filtered() {
 }
 
 function controlSummary(asset, c) {
-  if (c.locked) return 'Locked';
   const kind = kindOf(asset);
   if (kind === 'laptop' || kind === 'desktop') return adminText(c);
   if (kind === 'printer') return PRINT_MODES[c.print_mode] || 'Open';
@@ -577,11 +576,7 @@ export async function controlView(main) {
   try {
     const assets = await loadAssets();
     ui.assets = assets.filter(a => a.status !== 'disposed').sort((a, b) => (a.tag || '').localeCompare(b.tag || ''));
-    await loadControls();
-    await loadQueues();
-    await loadAgents();
-    await loadSoftwareAlerts();
-    await loadOps();
+    await Promise.all([loadControls(), loadQueues(), loadAgents(), loadSoftwareAlerts(), loadOps()]);
     if (pending().length) ui.showPopup = true;
     if (helpWaiting().length) ui.showHelp = true;
   } catch (err) {
@@ -596,14 +591,13 @@ function paint(main) {
   const focusId = document.activeElement?.id;
   const caret = document.activeElement?.selectionStart;
   const rows = filtered();
-  const counts = { computers: 0, printers: 0, hold: 0, locked: 0, waiting: 0 };
+  const counts = { computers: 0, printers: 0, hold: 0, waiting: 0 };
   for (const a of ui.assets) {
     const kind = kindOf(a);
     const c = current(a);
     if (kind === 'laptop' || kind === 'desktop') counts.computers += 1;
     if (kind === 'printer') counts.printers += 1;
     if (c.hold) counts.hold += 1;
-    if (c.locked) counts.locked += 1;
     if (enrollable(kind) && c.connection !== 'enrolled') counts.waiting += 1;
   }
   const selected = ui.assets.find(a => a.id === ui.selected) || null;
@@ -617,6 +611,7 @@ function paint(main) {
       </div>
       <div class="row">
         <a class="btn primary" href="/agent/MulkAgentSetup.exe" download="MulkAgentSetup.exe">Download Mulk Agent</a>
+        <button type="button" class="btn" id="bulk-install">Bulk install</button>
         <button type="button" class="btn ${helpWaiting().length ? 'primary' : ''}" id="open-help">Remote help (${helpWaiting().length})</button>
         <button type="button" class="btn ${pending().length ? 'primary' : ''}" id="open-requests">Admin requests (${pending().length})</button>
       </div>
@@ -650,7 +645,6 @@ function paint(main) {
       <div class="card kpi"><div class="k-label">Printers</div><div class="k-val">${counts.printers}</div></div>
       <div class="card kpi"><div class="k-label">Not enrolled</div><div class="k-val">${counts.waiting}</div></div>
       <div class="card kpi"><div class="k-label">On hold</div><div class="k-val">${counts.hold}</div></div>
-      <div class="card kpi"><div class="k-label">Locked</div><div class="k-val">${counts.locked}</div></div>
     </div>
     <div class="card" style="margin-bottom:16px">
       <div class="filters">
@@ -674,7 +668,7 @@ function paint(main) {
             <td>${esc(a.site || '—')}</td>
             <td>${esc(controlSummary(a, c))}</td>
             <td>${enrolled ? esc(connectionText(a, c)) : `<span class="badge st-under_repair">${esc(connectionText(a, c))}</span>`}</td>
-            <td>${[c.locked ? '<span class="badge st-broken">Locked</span>' : '', c.hold ? '<span class="badge st-broken">On hold</span>' : ''].filter(Boolean).join(' ') || '<span class="muted">No</span>'}</td>
+            <td>${c.hold ? '<span class="badge st-broken">On hold</span>' : '<span class="muted">No</span>'}</td>
           </tr>`;
         }).join('')}
       </tbody></table></div>` : `<div class="empty">${ui.assets.length ? 'No assets match these filters.' : 'No active assets in the register yet.'}</div>`}
@@ -730,6 +724,7 @@ function paint(main) {
       toast('Could not copy. Open supabase/laptop-control.sql in the project.', true);
     }
   }));
+  document.getElementById('bulk-install').onclick = () => askBulkInstall(main);
   document.getElementById('open-help').onclick = () => { ui.showHelp = true; paint(main); };
   document.getElementById('close-help')?.addEventListener('click', () => { ui.showHelp = false; paint(main); });
   document.getElementById('help-pop')?.addEventListener('mousedown', (e) => {
@@ -921,12 +916,9 @@ function detail(a) {
         </div>
       </div>
       <div>
-        <h2 style="margin-bottom:8px">Remote install</h2>
-        <p class="muted" style="margin:0">Queue an HTTPS installer that ends in .msi or .exe. Mulk Agent downloads it, runs it, and deletes the file. This is not a remote command prompt.</p>
+        <h2 style="margin-bottom:8px">Install jobs</h2>
+        <p class="muted" style="margin:0">Software is sent from Bulk install, for several computers at once. That asks for the authenticator and the install password. This computer downloads the file, runs it, and deletes it.</p>
         ${jobsNote(a)}
-        <div class="row" style="margin-top:10px">
-          <button type="button" class="btn sm" data-act="install" ${ui.opsReady ? '' : 'disabled'}>Install software</button>
-        </div>
       </div>
       <div>
         <h2 style="margin-bottom:8px">Remote support</h2>
@@ -980,12 +972,6 @@ function detail(a) {
         </label>
         <p class="muted" style="margin:10px 0 0">Open accepts jobs. Hold for release keeps a job until someone collects it at the printer. Black and white only rejects color. Stopped accepts nothing.</p>
       </div>` : ''}
-      <div>
-        <h2 style="margin-bottom:8px">Lock</h2>
-        ${c.locked
-          ? `<p style="margin:0 0 10px">Locked${c.lock_reason ? ': ' + esc(c.lock_reason) : ''}. ${computer ? 'Nobody can sign in to this computer until you unlock it. Wi-Fi and Ethernet stay on so it keeps reaching this dashboard.' : 'This asset should not be used until you unlock it.'} A lock does not wipe the computer.</p><button type="button" class="btn sm" data-act="unlock">Unlock asset</button>`
-          : `<p class="muted" style="margin:0 0 10px">A lock stops company use until you unlock it. On a Windows laptop or desktop, nobody can sign in again until you choose Unlock. Wi-Fi and Ethernet are kept on, so turning them off does not drop the dashboard connection. It does not read files, capture the screen, or record the keyboard. A lock does not wipe the computer.</p><button type="button" class="btn sm danger" data-act="lock">Lock asset</button>`}
-      </div>
       <div>
         <h2 style="margin-bottom:8px">Hold</h2>
         ${c.hold
@@ -1061,31 +1047,12 @@ async function act(main, asset, kind) {
       await save(main, asset, { ...current(asset), hold: true, hold_reason: reason }, 'hold', `Placed on hold: ${reason}`);
     } else if (kind === 'release') {
       await save(main, asset, { ...c, hold: false, hold_reason: null }, 'hold', 'Hold released');
-    } else if (kind === 'lock') {
-      let reason = '';
-      const ok = await modal({
-        title: 'Lock asset',
-        submit: 'Lock',
-        danger: true,
-        body: `<p style="margin:0">The person should be able to read this reason. On a Windows computer, sign-in is blocked until you unlock it. Wi-Fi and Ethernet stay connected so the unlock can reach the computer. A lock does not wipe the computer.</p>
-          <label class="f">Reason<textarea name="reason" required placeholder="Why this ${esc(noun)} is locked"></textarea></label>`,
-        onSubmit(form) {
-          reason = form.reason.value.trim();
-          if (reason.length < 8 || reason.length > 300) throw new Error('Write a reason between a sentence and a short paragraph.');
-        },
-      });
-      if (!ok) return;
-      await save(main, asset, { ...current(asset), locked: true, lock_reason: reason }, 'lock', `Locked: ${reason}`);
-    } else if (kind === 'unlock') {
-      await save(main, asset, { ...c, locked: false, lock_reason: null }, 'lock', 'Lock released');
     } else if (kind === 'agent-code') {
       await askForAgentCode(asset);
     } else if (kind === 'download-setup') {
       await downloadSetup(asset);
     } else if (kind === 'local-password') {
       await askLocalPassword(main, asset);
-    } else if (kind === 'install') {
-      await askInstall(main, asset);
     } else if (kind === 'support') {
       await askSupport(main, asset);
     } else if (kind === 'request') {
@@ -1308,39 +1275,74 @@ async function askLocalPassword(main, asset) {
   }
 }
 
-async function askInstall(main, asset) {
+async function askBulkInstall(main) {
+  const computers = ui.assets.filter(a => {
+    const kind = kindOf(a);
+    return (kind === 'laptop' || kind === 'desktop') && agentFor(a.id);
+  });
+  if (!computers.length) {
+    toast('Install Mulk Agent on a computer before sending software.', true);
+    return;
+  }
+  if (store.db.assurance() !== 'aal2') {
+    toast('Sign out and sign in with the authenticator code before installing software.', true);
+    return;
+  }
   let name = '';
   let url = '';
   let args = '';
+  let password = '';
+  let ids = [];
   const ok = await modal({
-    title: 'Install software',
-    submit: 'Queue install',
-    body: `<p style="margin:0">Mulk Agent downloads this HTTPS installer on <b class="mono">${esc(asset.tag)}</b> and runs it. Only a link ending in .msi or .exe is accepted. The file is deleted afterwards.</p>
+    title: 'Bulk install',
+    submit: 'Queue on selected computers',
+    body: `<p style="margin:0">The same HTTPS installer is queued for every ticked computer. Each one downloads it, runs it, and deletes the file. This needs the authenticator sign-in and the install password from Admins.</p>
       <label class="f">Name<input name="name" required placeholder="Google Chrome"></label>
       <label class="f">Installer link<input name="url" required placeholder="https://example.com/setup.msi"></label>
       <label class="f">Silent arguments, optional<input name="args" placeholder="/S"></label>
-      <p class="muted" style="margin:8px 0 0">An MSI already runs with /qn /norestart. For an EXE, type the vendor silent switch, such as /S or /quiet. Do not paste a script.</p>`,
+      <label class="check"><input type="checkbox" id="bulk-all" checked> All ${computers.length} computers with Mulk Agent</label>
+      <div class="stack" style="max-height:220px;overflow:auto;margin-top:8px">
+        ${computers.map(a => `<label class="check"><input type="checkbox" name="asset" value="${esc(a.id)}" checked> <span class="tag">${esc(a.tag)}</span> ${esc(a.description || a.assigned_to || '')}</label>`).join('')}
+      </div>
+      <label class="f">Install password<input name="password" type="password" required autocomplete="off"></label>
+      <p class="muted" style="margin:8px 0 0">An MSI already runs with /qn /norestart. For an EXE, type the vendor silent switch. Do not paste a script. Set the install password on the Admins page if you have not yet.</p>`,
     onSubmit(form) {
       name = form.name.value.trim();
       url = form.url.value.trim();
       args = form.args.value.trim();
+      password = form.password.value;
+      ids = [...form.querySelectorAll('input[name="asset"]:checked')].map(el => el.value);
+      if (!ids.length) throw new Error('Tick at least one computer.');
       if (name.length < 1 || name.length > 80) throw new Error('Name the software in 80 characters or fewer.');
-      if (!/^https:\/\//i.test(url)) throw new Error('The installer link must start with https://');
+      if (!/^https:\/\//i.test(url) || /^https:\/\/[^/\s]*@/i.test(url)) throw new Error('The installer link must start with https:// and cannot contain a password.');
       const path = url.split('?')[0].split('#')[0];
       if (!/\.(msi|exe)$/i.test(path)) throw new Error('The link must end in .msi or .exe');
       if (/[;&|`$<>]/.test(args)) throw new Error('Silent arguments cannot contain shell characters.');
+      if (password.length < 12) throw new Error('The install password is at least 12 characters.');
+    },
+    onReady(form) {
+      const all = form.querySelector('#bulk-all');
+      if (!all) return;
+      all.onchange = () => {
+        form.querySelectorAll('input[name="asset"]').forEach(el => { el.checked = all.checked; });
+      };
     },
   });
-  if (!ok) return;
-  await store.db.rpc('admin_queue_install', {
-    p_asset_id: asset.id,
-    p_name: name,
-    p_url: url,
-    p_silent_args: args || null,
-  });
-  toast('Install queued. The computer picks it up on the next check.');
-  await loadOps();
-  paint(main);
+  if (!ok) { password = ''; return; }
+  try {
+    const count = await store.db.rpc('admin_queue_bulk_install', {
+      p_asset_ids: ids,
+      p_name: name,
+      p_url: url,
+      p_silent_args: args || null,
+      p_password: password,
+    });
+    toast(`Queued on ${count} computer${count === 1 ? '' : 's'}. Each one picks it up on the next check.`);
+    await loadOps();
+    paint(main);
+  } finally {
+    password = '';
+  }
 }
 
 async function supportCodeFromForm() {
@@ -1362,11 +1364,6 @@ async function supportCodeFromForm() {
 async function connectHelp(main, id) {
   const row = helpWaiting().find(r => String(r.id) === String(id));
   if (!row) return;
-  const asset = assetTag(row.asset_id);
-  if (asset && current(asset).locked) {
-    toast('Unlock the computer before starting remote support.', true);
-    return;
-  }
   const code = await supportCodeFromForm();
   if (code == null) return;
   try {
@@ -1408,7 +1405,6 @@ async function declineHelp(main, id) {
 }
 
 async function askSupport(main, asset) {
-  if (current(asset).locked) throw new Error('Unlock the computer before starting remote support.');
   const asked = helpWaiting().find(s => s.asset_id === asset.id);
   const code = await supportCodeFromForm();
   if (code == null) return;
@@ -1418,6 +1414,8 @@ async function askSupport(main, asset) {
     toast('Waiting for them to choose Allow. Nothing opens until they do.');
     await loadOps();
     paint(main);
+  } catch (err) {
+    toast(err.message || String(err), true);
   }
 }
 

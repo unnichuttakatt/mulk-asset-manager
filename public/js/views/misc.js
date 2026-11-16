@@ -1,4 +1,4 @@
-import { esc, icon, toast, modal, fmtDate, fmtDateTime, fmtMoney, today, datalist, qrSvg, $, $$ } from '../ui.js';
+import { esc, icon, toast, modal, fmtDate, fmtDateTime, fmtMoney, today, datalist, qrSvg, ensureQr, $, $$ } from '../ui.js';
 import { store, ctx, loadAssets, distinct, STATUS, ACTION_LABEL, exportXlsx, exportSheets } from '../data.js';
 import { assetUrl } from './asset.js';
 import { setLabelSelection } from './assets.js';
@@ -58,7 +58,10 @@ export async function activityView(main, params) {
   let t;
   $('#q').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value.trim(); sync(); render(); }, 150); };
   for (const k of ['action', 'from', 'to']) $('#' + k).onchange = (e) => { f[k] = e.target.value; sync(); load(); };
-  $('#exp').onclick = () => exportSheets([{ name: 'Activity', rows: filtered().map(eventRow) }], `activity-${stamp()}.xlsx`);
+  $('#exp').onclick = async () => {
+    try { await exportSheets([{ name: 'Activity', rows: filtered().map(eventRow) }], `activity-${stamp()}.xlsx`); }
+    catch (e) { toast(e.message, true); }
+  };
   await load();
 }
 
@@ -91,24 +94,24 @@ function pivot(rows, rowKey, colKey, colLabels) {
 }
 
 export async function reportsView(main) {
-  const assets = await loadAssets(true);
+  const assets = await loadAssets();
   const active = assets.filter(a => a.status !== 'disposed');
   const reports = [
     ['Full asset register', 'Every asset with all fields, including disposed items.', () => exportXlsx(assets, `asset-register-${stamp()}.xlsx`)],
     ['Assets by employee', 'Checked-out assets grouped by person, with a count per employee.', () => {
       const out = assets.filter(a => a.status === 'checked_out').sort((a, b) => String(a.assigned_to).localeCompare(String(b.assigned_to)));
       const per = pivot(out, 'assigned_to', 'category');
-      exportSheets([{ name: 'Summary', rows: per }, { name: 'Detail', rows: out.map(a => ({ 'Employee': a.assigned_to, 'Department': a.department || '', 'Asset Tag ID': a.tag, 'Description': a.description || '', 'Category': a.category || '', 'Brand': a.brand || '', 'Model': a.model || '', 'Serial No': a.serial_no || '', 'Since': a.last_event_date || '' })) }], `assets-by-employee-${stamp()}.xlsx`);
+      return exportSheets([{ name: 'Summary', rows: per }, { name: 'Detail', rows: out.map(a => ({ 'Employee': a.assigned_to, 'Department': a.department || '', 'Asset Tag ID': a.tag, 'Description': a.description || '', 'Category': a.category || '', 'Brand': a.brand || '', 'Model': a.model || '', 'Serial No': a.serial_no || '', 'Since': a.last_event_date || '' })) }], `assets-by-employee-${stamp()}.xlsx`);
     }],
     ['Department summary', 'Count of active assets per department and category.', () => exportSheets([{ name: 'By department', rows: pivot(active, 'department', 'category') }], `department-summary-${stamp()}.xlsx`)],
     ['Category & status', 'How many of each category are available, checked out, in repair…', () => exportSheets([{ name: 'Category x status', rows: pivot(assets, 'category', 'status', Object.keys(STATUS)) }, { name: 'Site x status', rows: pivot(assets, 'site', 'status', Object.keys(STATUS)) }], `category-status-${stamp()}.xlsx`)],
     ['Repairs & faults', 'Assets under repair, broken or lost now, plus full repair history with costs.', async () => {
       const ev = await store.db.selectAll('asset_events', { select: '*,assets(tag,description)', action: 'in.(repair,repair_done,broken,lost)', order: 'event_date.desc' });
-      exportSheets([{ name: 'Current', rows: assets.filter(a => ['under_repair', 'broken', 'lost'].includes(a.status)).map(a => ({ 'Asset Tag ID': a.tag, 'Description': a.description || '', 'Status': STATUS[a.status].label, 'Since': a.last_event_date || '', 'Assigned to': a.assigned_to || '', 'Department': a.department || '' })) }, { name: 'History', rows: ev.map(eventRow) }], `repairs-${stamp()}.xlsx`);
+      return exportSheets([{ name: 'Current', rows: assets.filter(a => ['under_repair', 'broken', 'lost'].includes(a.status)).map(a => ({ 'Asset Tag ID': a.tag, 'Description': a.description || '', 'Status': STATUS[a.status].label, 'Since': a.last_event_date || '', 'Assigned to': a.assigned_to || '', 'Department': a.department || '' })) }, { name: 'History', rows: ev.map(eventRow) }], `repairs-${stamp()}.xlsx`);
     }],
     ['Disposed assets', 'Everything disposed, with date, method and value.', async () => {
       const ev = await store.db.selectAll('asset_events', { select: '*,assets(tag,description,category,serial_no)', action: 'eq.dispose', order: 'event_date.desc' });
-      exportSheets([{ name: 'Disposed', rows: ev.map(e => ({ 'Disposal Date': e.event_date, 'Asset Tag ID': e.assets?.tag || '', 'Description': e.assets?.description || '', 'Category': e.assets?.category || '', 'Serial No': e.assets?.serial_no || '', 'Last User': e.assigned_to || '', 'Method / Notes': e.notes || '', 'Value': e.cost ?? '', 'Recorded By': e.performed_by })) }], `disposed-${stamp()}.xlsx`);
+      return exportSheets([{ name: 'Disposed', rows: ev.map(e => ({ 'Disposal Date': e.event_date, 'Asset Tag ID': e.assets?.tag || '', 'Description': e.assets?.description || '', 'Category': e.assets?.category || '', 'Serial No': e.assets?.serial_no || '', 'Last User': e.assigned_to || '', 'Method / Notes': e.notes || '', 'Value': e.cost ?? '', 'Recorded By': e.performed_by })) }], `disposed-${stamp()}.xlsx`);
     }],
   ];
 
@@ -137,7 +140,8 @@ export async function reportsView(main) {
     const and = []; if ($('#rf').value) and.push('event_date.gte.' + $('#rf').value); if ($('#rt').value) and.push('event_date.lte.' + $('#rt').value);
     if (and.length) q.and = `(${and.join(',')})`;
     const ev = await store.db.selectAll('asset_events', q);
-    exportSheets([{ name: 'Activity', rows: ev.map(eventRow) }], `activity-${$('#rf').value || 'start'}-to-${$('#rt').value || stamp()}.xlsx`);
+    try { await exportSheets([{ name: 'Activity', rows: ev.map(eventRow) }], `activity-${$('#rf').value || 'start'}-to-${$('#rt').value || stamp()}.xlsx`); }
+    catch (e) { toast(e.message, true); }
   };
   const showPerson = () => {
     const name = $('#person').value.trim().toLowerCase();
@@ -162,6 +166,7 @@ const SIZES = {
 
 export async function labelsView(main) {
   const assets = await loadAssets();
+  try { await ensureQr(); } catch (e) { main.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   let ids = store.labelIds;
   if (!ids) { try { ids = JSON.parse(sessionStorage.getItem('am.labels') || 'null'); } catch { ids = null; } }
   const byId = new Map(assets.map(a => [a.id, a]));
@@ -222,7 +227,7 @@ export async function changePasswordDialog() {
       if (next !== form.p2.value) throw new Error('The new passwords do not match.');
       if (next === current) throw new Error('Choose a different password from the current one.');
       if (!email) throw new Error('Sign in again, then change the password.');
-      try { await store.db.signIn(email, current); }
+      try { await store.db.confirmPassword(email, current); }
       catch (e) { throw new Error(e.status === 400 ? 'The current password is wrong.' : e.message); }
       await store.db.updatePassword(next);
     },
@@ -233,6 +238,8 @@ export async function changePasswordDialog() {
 // ---------------- Admins ----------------
 export async function settingsView(main) {
   const admins = await store.db.select('app_admins', { select: '*', order: 'email.asc' });
+  let hasInstallPassword = false;
+  try { hasInstallPassword = Boolean(await store.db.rpc('admin_has_install_password')); } catch { hasInstallPassword = false; }
   const me = String(ctx.user?.email || '').toLowerCase();
   main.innerHTML = `
     <div class="page-head"><div><h1>Admins</h1><p>People allowed to use this app.</p></div>
@@ -241,6 +248,12 @@ export async function settingsView(main) {
       <div class="card-b row">
         <span class="muted">Signed in as ${esc(me || 'this account')}</span>
         <button class="btn" id="changepw">${icon('edit')} Change password</button>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:18px"><div class="card-h"><h2>Install password</h2></div>
+      <div class="card-b stack">
+        <p class="muted" style="margin:0">Bulk install asks for this password as well as the authenticator code. It is not your sign-in password. It is stored as a hash, and it is not shown again.</p>
+        <div class="row"><button class="btn" id="installpw">${icon('edit')} ${hasInstallPassword ? 'Change install password' : 'Set install password'}</button></div>
       </div>
     </div>
     <div class="grid-3">
@@ -256,6 +269,34 @@ export async function settingsView(main) {
       </div></div>
     </div>`;
   $('#changepw').onclick = () => changePasswordDialog();
+  $('#installpw').onclick = async () => {
+    let password = '';
+    const ok = await modal({
+      title: hasInstallPassword ? 'Change install password' : 'Set install password',
+      submit: 'Save install password',
+      body: `<p style="margin:0">Use this only for Bulk install. It is separate from the sign-in password. Use 12 to 64 characters, with an upper-case letter, a lower-case letter, and a digit.</p>
+        <label class="f">Install password<input name="p1" type="password" required autocomplete="new-password"></label>
+        <label class="f">Repeat<input name="p2" type="password" required autocomplete="new-password"></label>`,
+      onSubmit(form) {
+        password = form.p1.value;
+        if (password.length < 12 || password.length > 64) throw new Error('Use 12 to 64 characters.');
+        if (password !== form.p2.value) throw new Error('The two passwords do not match.');
+        if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
+          throw new Error('Include an upper-case letter, a lower-case letter, and a digit.');
+        }
+      },
+    });
+    if (!ok) return;
+    try {
+      await store.db.rpc('admin_set_install_password', { p_password: password });
+      toast('Install password saved');
+      settingsView(main);
+    } catch (e) {
+      toast(e.message || String(e), true);
+    } finally {
+      password = '';
+    }
+  };
   $('#add').onclick = async () => {
     const ok = await modal({
       title: 'Add admin', submit: 'Add',

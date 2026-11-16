@@ -90,9 +90,51 @@ export function createClient(url, anonKey) {
     get session() { return session; },
     onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); },
 
+    assurance() {
+      try {
+        const part = session?.access_token?.split('.')[1];
+        if (!part) return 'aal1';
+        const json = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+        return json.aal || 'aal1';
+      } catch { return 'aal1'; }
+    },
     async signIn(email, password) {
       const s = await authFetch('/token?grant_type=password', { method: 'POST', body: JSON.stringify({ email, password }) });
       setSession(s); return session;
+    },
+    async confirmPassword(email, password) {
+      await authFetch('/token?grant_type=password', { method: 'POST', body: JSON.stringify({ email, password }) });
+    },
+    async listFactors() {
+      const t = await token();
+      return authFetch('/factors', { headers: { Authorization: 'Bearer ' + t } });
+    },
+    async enrollTotp() {
+      const t = await token();
+      return authFetch('/factors', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + t },
+        body: JSON.stringify({ factor_type: 'totp', friendly_name: 'Mulk IT', issuer: 'Mulk IT' }),
+      });
+    },
+    async deleteFactor(id) {
+      const t = await token();
+      return authFetch('/factors/' + encodeURIComponent(id), { method: 'DELETE', headers: { Authorization: 'Bearer ' + t } });
+    },
+    async verifyFactor(id, code) {
+      const t = await token();
+      const challenge = await authFetch('/factors/' + encodeURIComponent(id) + '/challenge', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + t },
+        body: JSON.stringify({}),
+      });
+      const verified = await authFetch('/factors/' + encodeURIComponent(id) + '/verify', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + t },
+        body: JSON.stringify({ challenge_id: challenge.id, code }),
+      });
+      setSession(verified);
+      return session;
     },
     async signOut() {
       try { const t = await token(); if (t) await authFetch('/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + t } }); }

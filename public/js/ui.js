@@ -36,7 +36,7 @@ export function toast(msg, bad = false) {
 }
 
 // Opens a modal. `body` is HTML; onSubmit(form) may throw to show an error. Resolves true when submitted.
-export function modal({ title, body, submit = 'Save', danger = false, cancel = 'Cancel', onSubmit }) {
+export function modal({ title, body, submit = 'Save', danger = false, cancel = 'Cancel', onSubmit, onReady }) {
   return new Promise(resolve => {
     const bg = document.createElement('div');
     bg.className = 'modal-bg';
@@ -64,6 +64,7 @@ export function modal({ title, body, submit = 'Save', danger = false, cancel = '
       catch (err) { errBox.textContent = err.message || String(err); errBox.hidden = false; btn.disabled = false; }
     };
     document.body.appendChild(bg);
+    if (onReady) onReady(form);
     const first = form.querySelector('.card-b input, .card-b select, .card-b textarea');
     (first || form.querySelector('[type=submit]')).focus();
   });
@@ -93,6 +94,21 @@ export const fmtMoney = (n) => n == null || n === '' ? '' : Number(n).toLocaleSt
 
 export function datalist(id, values) {
   return `<datalist id="${esc(id)}">${values.map(v => `<option value="${esc(v)}">`).join('')}</datalist>`;
+}
+
+let qrLoading = null;
+export function ensureQr() {
+  if (window.qrcode) return Promise.resolve();
+  if (!qrLoading) {
+    qrLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/vendor/qrcode.js';
+      s.onload = () => (window.qrcode ? resolve() : reject(new Error('The QR code file did not start.')));
+      s.onerror = () => { qrLoading = null; reject(new Error('The QR code file did not load. Refresh and try again.')); };
+      document.head.appendChild(s);
+    });
+  }
+  return qrLoading;
 }
 
 export function qrSvg(text, cell = 4) {

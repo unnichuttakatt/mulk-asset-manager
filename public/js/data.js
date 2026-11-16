@@ -156,7 +156,23 @@ function toISODate(v, withTime = false) {
 }
 
 // Returns { rows, warnings, columns, unmapped }
-export function parseWorkbook(buffer) {
+let xlsxLoading = null;
+export function ensureXlsx() {
+  if (window.XLSX) return Promise.resolve();
+  if (!xlsxLoading) {
+    xlsxLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/vendor/xlsx.full.min.js';
+      s.onload = () => (window.XLSX ? resolve() : reject(new Error('The spreadsheet file did not start.')));
+      s.onerror = () => { xlsxLoading = null; reject(new Error('The spreadsheet file did not load. Refresh and try again.')); };
+      document.head.appendChild(s);
+    });
+  }
+  return xlsxLoading;
+}
+
+export async function parseWorkbook(buffer) {
+  await ensureXlsx();
   const wb = window.XLSX.read(buffer, { type: 'array', cellDates: false });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const raw = window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
@@ -201,7 +217,7 @@ export function parseWorkbook(buffer) {
 }
 
 // ---------------- Excel export ----------------
-export function exportXlsx(rows, filename, sheetName = 'Assets') {
+export async function exportXlsx(rows, filename, sheetName = 'Assets') {
   const data = rows.map(a => ({
     'Asset Tag ID': a.tag, 'Description': a.description || '', 'Category': a.category || '',
     'Brand': a.brand || '', 'Model': a.model || '', 'Serial No': a.serial_no || '',
@@ -215,7 +231,8 @@ export function exportXlsx(rows, filename, sheetName = 'Assets') {
   exportSheets([{ name: sheetName, rows: data }], filename);
 }
 
-export function exportSheets(sheets, filename) {
+export async function exportSheets(sheets, filename) {
+  await ensureXlsx();
   const X = window.XLSX;
   const wb = X.utils.book_new();
   for (const s of sheets) {

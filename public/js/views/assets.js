@@ -1,4 +1,4 @@
-import { esc, icon, $, $$ } from '../ui.js';
+import { esc, icon, toast, $, $$ } from '../ui.js';
 import { store, loadAssets, distinct, STATUS, exportXlsx } from '../data.js';
 
 const PAGE = 100;
@@ -141,14 +141,20 @@ export async function assetsView(main, params) {
       <button class="btn sm ghost" id="sel-clear">Clear selection</button>`;
     if (!selected.size) return;
     $('#sel-labels').onclick = () => { setLabelSelection([...selected]); location.hash = '#/labels'; };
-    $('#sel-export').onclick = () => exportXlsx(assets.filter(a => selected.has(a.id)), `assets-selected-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    $('#sel-export').onclick = async () => {
+      try { await exportXlsx(assets.filter(a => selected.has(a.id)), `assets-selected-${new Date().toISOString().slice(0, 10)}.xlsx`); }
+      catch (e) { toast(e.message, true); }
+    };
     $('#sel-clear').onclick = () => { selected.clear(); render(); };
   }
 
   let t;
   $('#q').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value.trim(); page = 0; syncUrl(); render(); }, 150); };
   $$('[data-f]').forEach(s => s.onchange = () => { const k = s.dataset.f; if (s.value) f[k] = s.value; else delete f[k]; page = 0; syncUrl(); render(); });
-  $('#export').onclick = () => exportXlsx(current(), `assets-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  $('#export').onclick = async () => {
+    try { await exportXlsx(current(), `assets-${new Date().toISOString().slice(0, 10)}.xlsx`); }
+    catch (e) { toast(e.message, true); }
+  };
   render();
   $('#q').focus();
 }

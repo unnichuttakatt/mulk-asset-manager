@@ -330,37 +330,11 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  job uuid;
-  v_name text;
-  v_url text;
-  v_args text;
 begin
   if not public.is_admin() then
     raise exception 'Not authorised';
   end if;
-  if not exists (select 1 from public.assets where id = p_asset_id and status <> 'disposed') then
-    raise exception 'Asset not found';
-  end if;
-  v_name := left(btrim(coalesce(p_name, '')), 80);
-  v_url := left(btrim(coalesce(p_url, '')), 500);
-  v_args := nullif(left(btrim(coalesce(p_silent_args, '')), 200), '');
-  if char_length(v_name) < 1 then
-    raise exception 'Name the software';
-  end if;
-  if v_url !~ '^https://' then
-    raise exception 'The installer link must start with https://';
-  end if;
-  if v_args ~ '[;&|`$<>]' then
-    raise exception 'Silent arguments cannot contain shell characters';
-  end if;
-  if right(lower(split_part(split_part(v_url, '?', 1), '#', 1)), 4) not in ('.msi', '.exe') then
-    raise exception 'The link must end in .msi or .exe';
-  end if;
-  insert into public.install_jobs (asset_id, name, source_url, silent_args, status)
-  values (p_asset_id, v_name, v_url, v_args, 'pending')
-  returning id into job;
-  return job;
+  raise exception 'Single-computer install is turned off. Use Bulk install.';
 end;
 $$;
 
