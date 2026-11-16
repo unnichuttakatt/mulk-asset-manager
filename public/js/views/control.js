@@ -494,6 +494,7 @@ function paint(main) {
       A phone is connected when the person installs the company management profile.
       Monitors and other items stay under this register: who has them, where they are, and whether they are on hold.
       Saving a decision here does not change the device until that enrollment exists. This page does not record keystrokes, screenshots, or location.
+      There is no agent file to download from this site. On a Windows laptop or desktop, install <strong>Company Portal</strong> from the Microsoft Store, published by Microsoft, then sign in with the company account. On a Mac, install <strong>Company Portal</strong> from the App Store, or use the Jamf enrollment your Microsoft or Jamf admin sends. Company Portal appears when the company subscription includes Intune, which you confirm in the Microsoft 365 admin center under Billing.
     </div>
     ${ui.source === 'local' ? `
       <div class="err" style="margin-bottom:16px">
@@ -620,7 +621,7 @@ function steps(kind) {
     return [
       'Match the serial number on the computer to this asset tag.',
       'The person signs in with their company account.',
-      'Windows: Settings, Accounts, Access work or school, then Connect, and enroll in the company Intune. Mac: open the Jamf enrollment IT sends. The person can see this. It is not hidden.',
+      'Windows: install Company Portal from the Microsoft Store and sign in with the company account. Or use Settings, Accounts, Access work or school, Connect. Mac: install Company Portal from the App Store, or open the Jamf enrollment IT sends. The person can see this. It is not hidden.',
       'Return here and choose Mark enrolled. Until then, the buttons below only save the decision. They do not change the computer.',
     ];
   }
