@@ -35,7 +35,7 @@ create table if not exists public.device_health (
 create table if not exists public.compliance_alerts (
   id               bigint generated always as identity primary key,
   asset_id         uuid not null references public.assets(id) on delete cascade,
-  kind             text not null check (kind in ('bitlocker', 'defender', 'firewall', 'disk', 'serial', 'local_admin', 'startup', 'banned')),
+  kind             text not null check (kind in ('bitlocker', 'defender', 'firewall', 'disk', 'serial', 'local_admin', 'startup', 'banned', 'unattended')),
   detail           text not null,
   happened_at      timestamptz not null default now(),
   acknowledged_at  timestamptz,

@@ -168,7 +168,7 @@ export async function dashboardView(main) {
               <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.detail)}</div></td>
               <td class="sub">${fmtDateTime(r.happened_at)}</td></tr>`;
           }).join('')}
-        </tbody></table></div>` : '<div class="empty">No open health alerts. Encryption, Defender, the firewall, disk space, and a serial mismatch are checked. Files are not read.</div>'}
+        </tbody></table></div>` : '<div class="empty">No open health alerts. Encryption, Defender, the firewall, disk space, a serial mismatch, and a computer left unlocked for more than 2 hours are checked. Files are not read.</div>'}
       </div>
       <div class="card">
         <div class="card-h"><h2>Not seen for a day</h2><a href="#/alerts">${offline.length ? offline.length + ' quiet' : 'Alerts'}</a></div>

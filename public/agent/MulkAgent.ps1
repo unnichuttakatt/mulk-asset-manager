@@ -5,6 +5,8 @@
 # It does not record keystrokes, screenshots, documents, page contents, or GPS.
 # A lock blocks Windows sign-in until IT unlocks it. Wi-Fi and Ethernet stay on.
 # IT can ask to open Windows Quick Assist. The person must choose Allow first.
+# A computer left unlocked and unused for more than 2 hours reminds the person
+# the next time they use it, and tells IT. Locking the screen is not an alert.
 # The screen is not saved, and the keyboard is not recorded.
 param(
   [switch]$Enforce,
@@ -305,6 +307,8 @@ public class MulkNative {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
   [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr OpenDesktop(string hDesktop, uint dwFlags, bool fInherit, uint dwDesiredAccess);
+  [DllImport("user32.dll")] public static extern bool CloseDesktop(IntPtr hDesktop);
   [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
   public static extern int sqlite3_open_v2(byte[] filename, out IntPtr db, int flags, IntPtr vfs);
   [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
@@ -348,6 +352,89 @@ function Get-IdleSeconds {
   return [int]($idle / 1000)
 }
 
+function Test-WorkstationLocked {
+  try {
+    Initialize-MulkNative
+    $desk = [MulkNative]::OpenDesktop('Default', 0, $false, 0x100)
+    if ($desk -eq [IntPtr]::Zero) { return $true }
+    [void][MulkNative]::CloseDesktop($desk)
+    return $false
+  } catch {
+    return $true
+  }
+}
+
+function Read-UnattendedState {
+  $path = Join-Path $Root 'unattended.json'
+  $empty = @{ reported = $false; notice = $false }
+  if (-not (Test-Path $path)) { return $empty }
+  try {
+    $raw = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    return @{ reported = [bool]$raw.reported; notice = [bool]$raw.notice }
+  } catch { return $empty }
+}
+
+function Save-UnattendedState($state) {
+  $json = '{"reported":' + $(if ($state.reported) { 'true' } else { 'false' }) + ',"notice":' + $(if ($state.notice) { 'true' } else { 'false' }) + '}'
+  Set-Content -Path (Join-Path $Root 'unattended.json') -Value $json -Encoding UTF8
+}
+
+function Show-OfficeStandard {
+  $mutex = New-Object System.Threading.Mutex($false, 'Local\MulkAgentUnattended')
+  if (-not $mutex.WaitOne(0, $false)) { return $false }
+  try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    [System.Windows.Forms.MessageBox]::Show(
+      "This computer was left signed in and unlocked, with nobody using it, for more than 2 hours.`r`n`r`nOffice standard: lock Windows before you leave your desk. Press the Windows key and L, or sign out. An unlocked computer can be used by someone else.`r`n`r`nIT has been told. This reminder does not include the screen or anything typed.",
+      'Office standard'
+    ) | Out-Null
+    return $true
+  } finally {
+    $mutex.ReleaseMutex() | Out-Null
+  }
+}
+
+function Update-Unattended {
+  $idle = Get-IdleSeconds
+  $locked = Test-WorkstationLocked
+  $state = Read-UnattendedState
+  if ($locked) {
+    if (-not $state.notice) { $state.reported = $false }
+    Save-UnattendedState $state
+    return
+  }
+  if ($idle -ge 7200) {
+    if (-not $state.reported) {
+      $config = Get-AgentConfig
+      $sent = $idle
+      if ($sent -gt 2592000) { $sent = 2592000 }
+      Invoke-AgentRpc $config 'agent_report_unattended' @{
+        p_token = [string]$config.token
+        p_idle_seconds = [int]$sent
+        p_local_date = (Get-Date).ToString('yyyy-MM-dd')
+      }
+      $state.reported = $true
+      $state.notice = $true
+      Save-UnattendedState $state
+      Write-AgentLog 'This computer was left unlocked and unused for more than 2 hours. The person will see the office reminder the next time they use it. The screen and keyboard were not collected.'
+    }
+    return
+  }
+  if ($idle -lt 180 -and $state.notice) {
+    if (Show-OfficeStandard) {
+      $state.notice = $false
+      $state.reported = $false
+      Save-UnattendedState $state
+      Write-AgentLog 'Showed the office reminder to lock Windows when stepping away.'
+    }
+    return
+  }
+  if ($idle -lt 180 -and $state.reported) {
+    $state.reported = $false
+    Save-UnattendedState $state
+  }
+}
+
 function Get-ForegroundApp {
   Initialize-MulkNative
   $hwnd = [MulkNative]::GetForegroundWindow()
@@ -388,6 +475,7 @@ function Save-ActivityQueue($queue) {
 }
 
 function Add-ActivitySample {
+  try { Update-Unattended } catch { Write-AgentLog ('Unattended check failed: ' + $_.Exception.Message) }
   $tick = [uint32][Environment]::TickCount
   $queue = Read-ActivityQueue
   $today = (Get-Date).ToString('yyyy-MM-dd')
@@ -1284,8 +1372,8 @@ if (-not $mutex.WaitOne(0, $false)) { exit 0 }
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Mulk Agent'
 $form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(520, 860)
-$form.MinimumSize = New-Object System.Drawing.Size(480, 780)
+$form.Size = New-Object System.Drawing.Size(520, 900)
+$form.MinimumSize = New-Object System.Drawing.Size(480, 820)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 $form.BackColor = [System.Drawing.Color]::FromArgb(244, 245, 247)
 
@@ -1297,69 +1385,69 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock blocks sign-in until IT unlocks it. Wi-Fi and Ethernet stay on. If you ask for remote help, IT can connect only after you choose Allow. Quick Assist then opens on this screen. The screen is not saved. It does not read files, capture the screen, record the keyboard, or use GPS.'
-$intro.Size = New-Object System.Drawing.Size(460, 132)
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock blocks sign-in until IT unlocks it. Wi-Fi and Ethernet stay on. If this computer is left unlocked and unused for more than 2 hours, you will see an office reminder the next time you use it. If you ask for remote help, IT can connect only after you choose Allow. Quick Assist then opens on this screen. The screen is not saved. It does not read files, capture the screen, record the keyboard, or use GPS.'
+$intro.Size = New-Object System.Drawing.Size(460, 156)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
 
 $status = New-Object System.Windows.Forms.Label
 $status.Size = New-Object System.Drawing.Size(460, 88)
-$status.Location = New-Object System.Drawing.Point(20, 192)
+$status.Location = New-Object System.Drawing.Point(20, 216)
 $form.Controls.Add($status)
 
 $rules = New-Object System.Windows.Forms.ListBox
 $rules.Size = New-Object System.Drawing.Size(460, 110)
-$rules.Location = New-Object System.Drawing.Point(20, 286)
+$rules.Location = New-Object System.Drawing.Point(20, 310)
 $form.Controls.Add($rules)
 
 $nameLabel = New-Object System.Windows.Forms.Label
 $nameLabel.Text = 'Your name'
-$nameLabel.Location = New-Object System.Drawing.Point(20, 406)
+$nameLabel.Location = New-Object System.Drawing.Point(20, 428)
 $nameLabel.AutoSize = $true
 $form.Controls.Add($nameLabel)
 
 $nameBox = New-Object System.Windows.Forms.TextBox
-$nameBox.Location = New-Object System.Drawing.Point(20, 428)
+$nameBox.Location = New-Object System.Drawing.Point(20, 450)
 $nameBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($nameBox)
 
 $reasonLabel = New-Object System.Windows.Forms.Label
 $reasonLabel.Text = 'Why you need admin rights'
-$reasonLabel.Location = New-Object System.Drawing.Point(20, 464)
+$reasonLabel.Location = New-Object System.Drawing.Point(20, 486)
 $reasonLabel.AutoSize = $true
 $form.Controls.Add($reasonLabel)
 
 $reasonBox = New-Object System.Windows.Forms.TextBox
-$reasonBox.Location = New-Object System.Drawing.Point(20, 486)
+$reasonBox.Location = New-Object System.Drawing.Point(20, 508)
 $reasonBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($reasonBox)
 
 $ask = New-Object System.Windows.Forms.Button
 $ask.Text = 'Request admin rights'
-$ask.Location = New-Object System.Drawing.Point(20, 522)
+$ask.Location = New-Object System.Drawing.Point(20, 544)
 $ask.Size = New-Object System.Drawing.Size(180, 34)
 $form.Controls.Add($ask)
 
 $refresh = New-Object System.Windows.Forms.Button
 $refresh.Text = 'Refresh'
-$refresh.Location = New-Object System.Drawing.Point(210, 522)
+$refresh.Location = New-Object System.Drawing.Point(210, 544)
 $refresh.Size = New-Object System.Drawing.Size(100, 34)
 $form.Controls.Add($refresh)
 
 $helpLabel = New-Object System.Windows.Forms.Label
 $helpLabel.Text = 'What do you need help with'
-$helpLabel.Location = New-Object System.Drawing.Point(20, 566)
+$helpLabel.Location = New-Object System.Drawing.Point(20, 588)
 $helpLabel.AutoSize = $true
 $form.Controls.Add($helpLabel)
 
 $helpBox = New-Object System.Windows.Forms.TextBox
-$helpBox.Location = New-Object System.Drawing.Point(20, 588)
+$helpBox.Location = New-Object System.Drawing.Point(20, 610)
 $helpBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($helpBox)
 
 $help = New-Object System.Windows.Forms.Button
 $help.Text = 'Request remote help'
-$help.Location = New-Object System.Drawing.Point(20, 624)
+$help.Location = New-Object System.Drawing.Point(20, 646)
 $help.Size = New-Object System.Drawing.Size(180, 34)
 $form.Controls.Add($help)
 
@@ -1367,7 +1455,7 @@ $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Multiline = $true
 $logBox.ReadOnly = $true
 $logBox.ScrollBars = 'Vertical'
-$logBox.Location = New-Object System.Drawing.Point(20, 668)
+$logBox.Location = New-Object System.Drawing.Point(20, 690)
 $logBox.Size = New-Object System.Drawing.Size(460, 72)
 $form.Controls.Add($logBox)
 
@@ -1466,6 +1554,7 @@ $timer.Add_Tick({
 $timer.Start()
 $form.Add_Shown({
   Update-Window
+  try { Update-Unattended } catch { }
   try { Ask-RemoteApproval } catch { }
 })
 [void]$form.ShowDialog()

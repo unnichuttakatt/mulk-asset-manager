@@ -17,6 +17,7 @@ const COMPLIANCE = {
   local_admin: 'Local administrators',
   startup: 'Startup programs',
   banned: 'Banned program',
+  unattended: 'Left unattended',
 };
 
 const ui = {
@@ -150,7 +151,7 @@ function paint(main) {
     <div class="page-head">
       <div>
         <h1>Alerts</h1>
-        <p>New programs, USB devices, computers outside the UAE, and health. Files, the screen, and the keyboard are not collected. The first software, USB, and startup report from a machine is its baseline.</p>
+        <p>New programs, USB devices, computers outside the UAE, health, and a computer left unlocked for more than 2 hours. Files, the screen, and the keyboard are not collected. The first software, USB, and startup report from a machine is its baseline.</p>
       </div>
       <div class="row">
         <button type="button" class="btn" id="toggle-open">${ui.openOnly ? 'Show history' : 'Open only'}</button>
@@ -176,7 +177,7 @@ function paint(main) {
       </tbody></table></div>` : '<div class="empty">Every enrolled computer has checked in during the last day, or none are enrolled yet.</div>'}
     </div>
     <div class="card" style="margin-bottom:16px">
-      <div class="card-h"><h2>Health</h2><span class="muted">Encryption, Defender, firewall, disk, serial, local admins, startup</span></div>
+      <div class="card-h"><h2>Health</h2><span class="muted">Encryption, Defender, firewall, disk, serial, local admins, startup, left unlocked</span></div>
       ${ui.compliance.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Asset</th><th>Check</th><th>Detail</th><th></th></tr></thead><tbody>
         ${ui.compliance.map(r => `<tr>
           <td>${fmtDateTime(r.happened_at)}</td>
@@ -185,7 +186,7 @@ function paint(main) {
           <td>${esc(r.detail)}</td>
           <td style="text-align:right">${r.acknowledged_at ? '<span class="muted">Reviewed</span>' : `<button type="button" class="btn sm" data-ack="compliance_alerts" data-id="${esc(r.id)}">Mark reviewed</button>`}</td>
         </tr>`).join('')}
-      </tbody></table></div>` : '<div class="empty">No health alerts. BitLocker, Defender, or the firewall being off, low disk, a serial that does not match the asset, a banned program, or a change in local administrators or startup names appears here. A restart waiting is shown on the computer, not as an alert.</div>'}
+      </tbody></table></div>` : '<div class="empty">No health alerts. BitLocker, Defender, or the firewall being off, low disk, a serial that does not match the asset, a banned program, a change in local administrators or startup names, or a computer left unlocked and unused for more than 2 hours appears here. A restart waiting is shown on the computer, not as an alert. Locking the screen is the expected practice and is not an alert.</div>'}
     </div>
     <div class="card" style="margin-bottom:16px">
       <div class="card-h"><h2>Banned programs</h2><span class="muted">Matched to the installed name</span></div>
