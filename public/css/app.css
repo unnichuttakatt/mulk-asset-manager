@@ -123,7 +123,8 @@ input[type=checkbox] { width: 16px; height: 16px; min-height: 0; accent-color: v
 
 /* KPIs */
 .kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px; }
-@media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, 1fr); } }
+.kpis.kpis-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 1100px) { .kpis, .kpis.kpis-4 { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
 .kpi { display: block; padding: 14px 16px; color: var(--ink); }
 .kpi:hover { text-decoration: none; border-color: var(--focus); }
@@ -162,6 +163,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tbl th.sortable:hover { color: var(--ink); }
 .tbl td { padding: 9px 12px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
 .tbl tbody tr:hover { background: var(--panel-2); }
+.tbl tbody tr.on { background: var(--accent-soft); }
 .tbl tr.clickable { cursor: pointer; }
 .tbl .cb { width: 34px; }
 .tbl .sub { color: var(--muted); font-size: 12px; }
