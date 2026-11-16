@@ -612,6 +612,7 @@ function paint(main) {
       <div class="row">
         <a class="btn primary" href="/agent/MulkAgentSetup.exe" download="MulkAgentSetup.exe">Download Mulk Agent</a>
         <button type="button" class="btn" id="bulk-install">Bulk install</button>
+        <button type="button" class="btn" id="all-local-password">Local admin password</button>
         <button type="button" class="btn ${helpWaiting().length ? 'primary' : ''}" id="open-help">Remote help (${helpWaiting().length})</button>
         <button type="button" class="btn ${pending().length ? 'primary' : ''}" id="open-requests">Admin requests (${pending().length})</button>
       </div>
@@ -725,6 +726,7 @@ function paint(main) {
     }
   }));
   document.getElementById('bulk-install').onclick = () => askBulkInstall(main);
+  document.getElementById('all-local-password').onclick = () => askAllLocalPasswords(main);
   document.getElementById('open-help').onclick = () => { ui.showHelp = true; paint(main); };
   document.getElementById('close-help')?.addEventListener('click', () => { ui.showHelp = false; paint(main); });
   document.getElementById('help-pop')?.addEventListener('mousedown', (e) => {
@@ -909,7 +911,7 @@ function detail(a) {
       </div>
       <div>
         <h2 style="margin-bottom:8px">Local Administrator password</h2>
-        <p class="muted" style="margin:0">Sets the built-in Administrator password on this computer once. The account is not enabled by this change. The password is deleted from the database after it is applied, and it is not written to the agent log.</p>
+        <p class="muted" style="margin:0">Sets the built-in Administrator password on this computer once. Use <b>Local admin password</b> at the top of Control to send the same password to every computer that has Mulk Agent. The account is not enabled by this change. The password is deleted from the database after it is applied, and it is not written to the agent log.</p>
         ${passwordNote(a)}
         <div class="row" style="margin-top:10px">
           <button type="button" class="btn sm" data-act="local-password" ${ui.opsReady ? '' : 'disabled'}>Change local admin password</button>
@@ -1245,6 +1247,39 @@ async function downloadSetup(asset) {
   ]);
   downloadBlob(`MulkAgent-${safeTag}.zip`, zip, 'application/zip');
   toast('Setup downloaded. Unzip it and run MulkAgentSetup.exe. The code is already filled in.');
+}
+
+async function askAllLocalPasswords(main) {
+  const computers = ui.assets.filter(a => agentFor(a.id) && a.status !== 'disposed');
+  if (!computers.length) {
+    toast('Install Mulk Agent on a computer before setting the local Administrator password.', true);
+    return;
+  }
+  let password = '';
+  const ok = await modal({
+    title: 'Local Administrator password for every computer',
+    submit: 'Send to all computers',
+    body: `<p style="margin:0">This sets the built-in Administrator password on all <b>${computers.length}</b> computer${computers.length === 1 ? '' : 's'} that have Mulk Agent. Each computer applies it on the next check, then the password is deleted from the database. It is not written to the agent log, and this does not enable the account.</p>
+      <label class="f">New password<input name="password" type="password" required autocomplete="new-password"></label>
+      <label class="f">Confirm<input name="confirm" type="password" required autocomplete="new-password"></label>`,
+    onSubmit(form) {
+      password = form.password.value;
+      if (password !== form.confirm.value) throw new Error('The two passwords do not match.');
+      if (password.length < 12 || password.length > 64) throw new Error('Use 12 to 64 characters.');
+      if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
+        throw new Error('Include an upper-case letter, a lower-case letter, and a digit.');
+      }
+    },
+  });
+  if (!ok) return;
+  try {
+    const count = await store.db.rpc('admin_set_all_local_passwords', { p_password: password });
+    toast(`Password queued for ${count} computer${count === 1 ? '' : 's'}. It is deleted after each computer applies it.`);
+    await loadOps();
+    paint(main);
+  } finally {
+    password = '';
+  }
 }
 
 async function askLocalPassword(main, asset) {
