@@ -242,12 +242,6 @@ function mfaCode(factorId) {
 
 async function start() {
   ctx.user = store.db.session?.user || null;
-  if (store.db.assurance() !== 'aal2') {
-    try {
-      const factorId = await store.db.verifiedTotpId();
-      if (factorId) return mfaCode(factorId);
-    } catch { /* the password sign-in still opens the app */ }
-  }
   let ok = false;
   try { ok = await store.db.rpc('is_admin'); }
   catch (e) { if (e.status === 401) { await store.db.signOut(); return loginScreen('Please sign in again.'); } throw e; }
