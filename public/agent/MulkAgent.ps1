@@ -1383,7 +1383,7 @@ function Invoke-Enforce {
   try { Invoke-PendingInstall $config } catch { Write-AgentLog ("Install failed: " + $_.Exception.Message) }
   try { Send-Presence $config } catch { Write-AgentLog ("Location report failed: " + $_.Exception.Message) }
   try { Ensure-SampleTask } catch { Write-AgentLog ("Activity schedule failed: " + $_.Exception.Message) }
-  if (Test-Due 'inventory' 30) {
+  if (Test-Due 'inventory' 120) {
     $heavyOk = $true
     try { Send-SoftwareInventory $config } catch { $heavyOk = $false; Write-AgentLog ("Software report failed: " + $_.Exception.Message) }
     try { Send-Health $config } catch { $heavyOk = $false; Write-AgentLog ("Health report failed: " + $_.Exception.Message) }
