@@ -3,9 +3,11 @@
 # It reports installed programs, USB devices, the public IP city/country,
 # web searches, active time, and which app is in front.
 # It does not record keystrokes, screenshots, documents, page contents, or GPS.
+# A lock blocks Windows sign-in until IT unlocks it. Wi-Fi and Ethernet stay on.
 param(
   [switch]$Enforce,
-  [switch]$Sample
+  [switch]$Sample,
+  [switch]$Watch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -792,30 +794,277 @@ function Invoke-PendingInstall($Config) {
   Write-AgentLog ("Install " + $name + ": " + $detail)
 }
 
-function Initialize-SessionLock {
-  if ('MulkSessionLock' -as [type]) { return }
+$LockFlag = Join-Path $Root 'locked.flag'
+
+function Initialize-LogonPolicy {
+  if ('MulkLogonPolicy' -as [type]) { return }
   Add-Type -TypeDefinition @'
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
-public static class MulkSessionLock {
-  [DllImport("user32.dll", SetLastError = true)]
-  public static extern bool LockWorkStation();
+
+public static class MulkLogonPolicy {
+  [StructLayout(LayoutKind.Sequential)]
+  struct LSA_UNICODE_STRING {
+    public ushort Length;
+    public ushort MaximumLength;
+    public IntPtr Buffer;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct LSA_OBJECT_ATTRIBUTES {
+    public int Length;
+    public IntPtr RootDirectory;
+    public IntPtr ObjectName;
+    public uint Attributes;
+    public IntPtr SecurityDescriptor;
+    public IntPtr SecurityQualityOfService;
+  }
+
+  [DllImport("advapi32.dll", PreserveSig = true)]
+  static extern uint LsaOpenPolicy(IntPtr system, ref LSA_OBJECT_ATTRIBUTES attributes, uint access, out IntPtr handle);
+
+  [DllImport("advapi32.dll", PreserveSig = true)]
+  static extern uint LsaAddAccountRights(IntPtr policy, IntPtr sid, LSA_UNICODE_STRING[] rights, uint count);
+
+  [DllImport("advapi32.dll", PreserveSig = true)]
+  static extern uint LsaRemoveAccountRights(IntPtr policy, IntPtr sid, bool allRights, LSA_UNICODE_STRING[] rights, uint count);
+
+  [DllImport("advapi32.dll", PreserveSig = true)]
+  static extern uint LsaEnumerateAccountRights(IntPtr policy, IntPtr sid, out IntPtr rights, out uint count);
+
+  [DllImport("advapi32.dll")]
+  static extern uint LsaFreeMemory(IntPtr buffer);
+
+  [DllImport("advapi32.dll")]
+  static extern uint LsaClose(IntPtr handle);
+
+  [DllImport("advapi32.dll")]
+  static extern uint LsaNtStatusToWinError(uint status);
+
+  const uint POLICY_ALL_ACCESS = 0x000F0FFF;
+  const uint STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034;
+
+  static IntPtr OpenPolicy() {
+    LSA_OBJECT_ATTRIBUTES attributes = new LSA_OBJECT_ATTRIBUTES();
+    attributes.Length = Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+    IntPtr handle;
+    uint status = LsaOpenPolicy(IntPtr.Zero, ref attributes, POLICY_ALL_ACCESS, out handle);
+    if (status != 0) throw new Win32Exception((int)LsaNtStatusToWinError(status));
+    return handle;
+  }
+
+  static LSA_UNICODE_STRING MakeString(string value) {
+    LSA_UNICODE_STRING text = new LSA_UNICODE_STRING();
+    text.Buffer = Marshal.StringToHGlobalUni(value);
+    text.Length = (ushort)(value.Length * 2);
+    text.MaximumLength = (ushort)((value.Length + 1) * 2);
+    return text;
+  }
+
+  static void FreeString(LSA_UNICODE_STRING text) {
+    if (text.Buffer != IntPtr.Zero) Marshal.FreeHGlobal(text.Buffer);
+  }
+
+  static void Check(uint status) {
+    if (status != 0) throw new Win32Exception((int)LsaNtStatusToWinError(status));
+  }
+
+  public static bool HasRight(byte[] sid, string right) {
+    IntPtr policy = OpenPolicy();
+    IntPtr sidPtr = Marshal.AllocHGlobal(sid.Length);
+    try {
+      Marshal.Copy(sid, 0, sidPtr, sid.Length);
+      IntPtr rights;
+      uint count;
+      uint status = LsaEnumerateAccountRights(policy, sidPtr, out rights, out count);
+      if (status == STATUS_OBJECT_NAME_NOT_FOUND) return false;
+      Check(status);
+      try {
+        int size = Marshal.SizeOf(typeof(LSA_UNICODE_STRING));
+        for (int i = 0; i < count; i++) {
+          IntPtr item = new IntPtr(rights.ToInt64() + (i * size));
+          LSA_UNICODE_STRING text = (LSA_UNICODE_STRING)Marshal.PtrToStructure(item, typeof(LSA_UNICODE_STRING));
+          string name = Marshal.PtrToStringUni(text.Buffer, text.Length / 2);
+          if (string.Equals(name, right, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+      } finally {
+        LsaFreeMemory(rights);
+      }
+    } finally {
+      Marshal.FreeHGlobal(sidPtr);
+      LsaClose(policy);
+    }
+  }
+
+  public static void AddRight(byte[] sid, string right) {
+    IntPtr policy = OpenPolicy();
+    IntPtr sidPtr = Marshal.AllocHGlobal(sid.Length);
+    LSA_UNICODE_STRING text = MakeString(right);
+    try {
+      Marshal.Copy(sid, 0, sidPtr, sid.Length);
+      Check(LsaAddAccountRights(policy, sidPtr, new LSA_UNICODE_STRING[] { text }, 1));
+    } finally {
+      FreeString(text);
+      Marshal.FreeHGlobal(sidPtr);
+      LsaClose(policy);
+    }
+  }
+
+  public static void RemoveRight(byte[] sid, string right) {
+    IntPtr policy = OpenPolicy();
+    IntPtr sidPtr = Marshal.AllocHGlobal(sid.Length);
+    LSA_UNICODE_STRING text = MakeString(right);
+    try {
+      Marshal.Copy(sid, 0, sidPtr, sid.Length);
+      uint status = LsaRemoveAccountRights(policy, sidPtr, false, new LSA_UNICODE_STRING[] { text }, 1);
+      if (status == STATUS_OBJECT_NAME_NOT_FOUND) return;
+      Check(status);
+    } finally {
+      FreeString(text);
+      Marshal.FreeHGlobal(sidPtr);
+      LsaClose(policy);
+    }
+  }
 }
 '@
 }
 
-function Lock-InteractiveSession {
+function Get-SidBytes([string]$Sid) {
+  $id = New-Object System.Security.Principal.SecurityIdentifier($Sid)
+  $bytes = New-Object byte[] ($id.BinaryLength)
+  $id.GetBinaryForm($bytes, 0)
+  Write-Output $bytes -NoEnumerate
+}
+
+function Deny-InteractiveLogon {
+  Initialize-LogonPolicy
+  $rights = @('SeDenyInteractiveLogonRight', 'SeDenyRemoteInteractiveLogonRight')
+  $sids = @('S-1-1-0')
+  $added = New-Object System.Collections.Generic.List[string]
+  foreach ($sid in $sids) {
+    $bytes = Get-SidBytes $sid
+    foreach ($right in $rights) {
+      if (-not [MulkLogonPolicy]::HasRight($bytes, $right)) {
+        [MulkLogonPolicy]::AddRight($bytes, $right)
+        $added.Add($sid + '|' + $right)
+      }
+    }
+  }
+  return @($added)
+}
+
+function Allow-InteractiveLogon([string[]]$Pairs) {
+  if (-not $Pairs) { return }
+  Initialize-LogonPolicy
+  foreach ($pair in @($Pairs)) {
+    if ($pair -notmatch '^S-1-1-0\|SeDeny(Remote)?InteractiveLogonRight$') { continue }
+    $sid, $right = $pair.Split('|')
+    [MulkLogonPolicy]::RemoveRight((Get-SidBytes $sid), $right)
+  }
+}
+
+function Read-LockFlag {
+  if (-not (Test-Path $LockFlag)) { return $null }
+  $info = @{ account = ''; rights = @() }
+  foreach ($line in @(Get-Content -Path $LockFlag -ErrorAction SilentlyContinue)) {
+    if ($line -like 'account=*') { $info.account = $line.Substring(8).Trim() }
+    elseif ($line -like 'rights=*') {
+      $info.rights = @($line.Substring(7).Split(';') | Where-Object { $_ })
+    }
+  }
+  return $info
+}
+
+function Write-LockFlag([string]$Account, [string[]]$Rights) {
+  $text = @('account=' + $Account, 'rights=' + ((@($Rights) | Where-Object { $_ }) -join ';'))
+  Set-Content -Path $LockFlag -Value $text -Encoding UTF8
+}
+
+function Get-LocalLogonName([string]$Account) {
+  if (-not $Account) { return $null }
+  if ($Account -match '^(AzureAD\\|.*@)') { return $null }
+  if ($Account -match '\\') {
+    $domain, $name = $Account.Split('\', 2)
+    if ($domain -ne '.' -and $domain.ToLower() -ne $env:COMPUTERNAME.ToLower() -and $domain.ToLower() -ne 'localhost') { return $null }
+    return $name
+  }
+  return $Account
+}
+
+function Set-EnrolledLocalAccount([string]$Account, [bool]$Enabled) {
+  $name = Get-LocalLogonName $Account
+  if (-not $name -or $name -eq 'Administrator') { return $false }
+  $out = & "$env:SystemRoot\System32\net.exe" user $name 2>&1 | Out-String
+  if ($out -notmatch 'Account active') { return $false }
+  $active = $out -match 'Account active\s+Yes'
+  if ($Enabled) {
+    if (-not $active) { & "$env:SystemRoot\System32\net.exe" user $name /active:yes | Out-Null }
+    return $true
+  }
+  if ($active) {
+    & "$env:SystemRoot\System32\net.exe" user $name /active:no | Out-Null
+    return $true
+  }
+  return $false
+}
+
+function Enable-CompanyNetwork {
+  $turnedOn = @()
   try {
-    Initialize-SessionLock
-    [MulkSessionLock]::LockWorkStation() | Out-Null
-  } catch { }
+    foreach ($adapter in @(Get-NetAdapter -ErrorAction Stop)) {
+      $blob = ([string]$adapter.Name) + ' ' + ([string]$adapter.InterfaceDescription)
+      if ($blob -match 'Virtual|Hyper-V|VPN|Bluetooth|Loopback|Miniport|Teredo') { continue }
+      $medium = [string]$adapter.NdisPhysicalMedium
+      $lan = $medium -match '802\.3|802_11|Native802' -or $blob -match 'Ethernet|LAN|Wi-Fi|WiFi|WLAN|Wireless'
+      if (-not $lan) { continue }
+      if ([string]$adapter.Status -eq 'Disabled') {
+        Enable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue
+        & "$env:SystemRoot\System32\netsh.exe" interface set interface name="$($adapter.Name)" admin=enabled | Out-Null
+        $turnedOn += [string]$adapter.Name
+      }
+    }
+  } catch {
+    Write-AgentLog 'Network adapters could not be checked. Wi-Fi and Ethernet were not turned off.'
+  }
+  foreach ($name in @('WlanSvc', 'Dhcp', 'Dnscache', 'NlaSvc')) {
+    try {
+      $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+      if (-not $service) { continue }
+      if ($service.StartType -eq 'Disabled') {
+        $startup = 'Manual'
+        if ($name -eq 'WlanSvc' -or $name -eq 'Dhcp') { $startup = 'Automatic' }
+        Set-Service -Name $name -StartupType $startup -ErrorAction SilentlyContinue
+        $turnedOn += $name
+      }
+      if ((Get-Service -Name $name).Status -ne 'Running') {
+        Start-Service -Name $name -ErrorAction SilentlyContinue
+      }
+    } catch { }
+  }
+  if ($turnedOn.Count -gt 0) {
+    Write-AgentLog ('Kept the dashboard connection on: ' + ($turnedOn -join ', ') + '. Wi-Fi and Ethernet are not turned off while this computer is locked.')
+  }
+}
+
+function Stop-UserSessions {
+  $lines = @(& "$env:SystemRoot\System32\query.exe" session 2>$null)
+  foreach ($line in $lines) {
+    $text = [string]$line
+    if ($text -notmatch '\s(\d+)\s+(Active|Disc)') { continue }
+    $id = [int]$Matches[1]
+    if ($id -le 0) { continue }
+    if ($text -match 'services') { continue }
+    & "$env:SystemRoot\System32\logoff.exe" $id 2>$null | Out-Null
+  }
 }
 
 function Set-LockNotice([bool]$Locked, [string]$Reason) {
   $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
   try {
     if ($Locked) {
-      $text = 'This computer is locked by Mulk IT.'
+      $text = 'This computer is locked by Mulk IT. You cannot sign in until an administrator unlocks it. Wi-Fi and Ethernet stay connected.'
       if ($Reason) { $text = $text + ' ' + $Reason }
       if ($text.Length -gt 400) { $text = $text.Substring(0, 400) }
       if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
@@ -833,16 +1082,69 @@ function Set-LockNotice([bool]$Locked, [string]$Reason) {
   }
 }
 
-function Invoke-RemoteSessionLock([string]$User) {
-  if (-not $User) { return }
-  $tr = 'rundll32.exe user32.dll,LockWorkStation'
-  & schtasks.exe /Create /TN 'Mulk Agent Lock' /SC ONCE /ST 00:00 /RU $User /IT /RL LIMITED /TR $tr /F | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    Write-AgentLog 'The Windows session could not be locked from the system task. It locks when the Mulk Agent window is open.'
+function Sync-AssetLock($policy) {
+  $locked = [bool]$policy.locked
+  $reason = [string]$policy.lock_reason
+  $user = [string]$policy.windows_user
+  if ($locked) {
+    Enable-CompanyNetwork
+    Set-LockNotice $true $reason
+    $existing = Read-LockFlag
+    if ($existing) {
+      Deny-InteractiveLogon | Out-Null
+      if (-not $existing.rights -or @($existing.rights).Count -eq 0) {
+        $existing.rights = @(
+          'S-1-1-0|SeDenyInteractiveLogonRight',
+          'S-1-1-0|SeDenyRemoteInteractiveLogonRight'
+        )
+        Write-LockFlag $existing.account $existing.rights
+      }
+      if ($existing.account) { Set-EnrolledLocalAccount $existing.account $false | Out-Null }
+    } else {
+      $added = @(Deny-InteractiveLogon)
+      $account = ''
+      if (Set-EnrolledLocalAccount $user $false) { $account = Get-LocalLogonName $user }
+      Write-LockFlag $account $added
+      Write-AgentLog 'Sign-in is blocked until IT unlocks this computer. Wi-Fi and Ethernet stay enabled so it can keep reaching the dashboard.'
+    }
+    Stop-UserSessions
+    & schtasks.exe /Delete /TN 'Mulk Agent Lock' /F 2>$null | Out-Null
     return
   }
-  & schtasks.exe /Run /TN 'Mulk Agent Lock' | Out-Null
-  Write-AgentLog 'Windows session lock requested.'
+  $existing = Read-LockFlag
+  if (-not $existing) {
+    Set-LockNotice $false ''
+    return
+  }
+  Allow-InteractiveLogon $existing.rights
+  if ($existing.account) { Set-EnrolledLocalAccount $existing.account $true | Out-Null }
+  Set-LockNotice $false ''
+  Remove-Item -Path $LockFlag -Force -ErrorAction SilentlyContinue
+  & schtasks.exe /Delete /TN 'Mulk Agent Lock' /F 2>$null | Out-Null
+  Write-AgentLog 'IT unlocked this computer. Sign-in is allowed again.'
+}
+
+function Ensure-WatchTask {
+  $tr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Watch'
+  & schtasks.exe /Create /TN 'Mulk Agent Watch' /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /TR $tr /F | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-AgentLog 'The one-minute dashboard check could not be scheduled. The five-minute check still runs.'
+  }
+}
+
+function Invoke-Watch {
+  try {
+    $policy = Get-Policy (Get-AgentConfig)
+    Sync-AssetLock $policy
+  } catch {
+    if (Test-Path $LockFlag) {
+      try { Enable-CompanyNetwork } catch { }
+      try { Deny-InteractiveLogon | Out-Null } catch { }
+      Write-AgentLog 'Dashboard was not reached. Sign-in stays blocked, and Wi-Fi and Ethernet stay on.'
+    } else {
+      Write-AgentLog ('Lock watch could not reach the dashboard: ' + $_.Exception.Message)
+    }
+  }
 }
 
 function Invoke-Enforce {
@@ -851,16 +1153,12 @@ function Invoke-Enforce {
   $user = [string]$policy.windows_user
   if (-not $user) { $user = [string]$config.windows_user }
   $locked = [bool]$policy.locked
-  try { Set-LockNotice $locked ([string]$policy.lock_reason) } catch { }
+  try { Sync-AssetLock $policy } catch { Write-AgentLog ('Sign-in lock failed: ' + $_.Exception.Message) }
+  try { Ensure-WatchTask } catch { Write-AgentLog ('Dashboard check schedule failed: ' + $_.Exception.Message) }
   $grant = ($policy.admin -eq 'elevated' -or $policy.admin -eq 'standing') -and -not [bool]$policy.hold -and -not $locked
   Set-LocalAdmin $user $grant
   $usb = [string]$policy.usb
   if ([bool]$policy.hold -or $locked) { $usb = 'block' }
-  if ($locked) {
-    try { Invoke-RemoteSessionLock $user } catch { Write-AgentLog 'Session lock failed.' }
-  } else {
-    & schtasks.exe /Delete /TN 'Mulk Agent Lock' /F 2>$null | Out-Null
-  }
   if ($usb -notin @('block', 'read', 'allow')) { $usb = 'block' }
   Set-UsbPolicy $usb
   try { Send-SoftwareInventory $config } catch { Write-AgentLog ("Software report failed: " + $_.Exception.Message) }
@@ -872,7 +1170,7 @@ function Invoke-Enforce {
   try { Ensure-SampleTask } catch { Write-AgentLog ("Activity schedule failed: " + $_.Exception.Message) }
   try { Send-Usage $config } catch { Write-AgentLog ("Usage report failed: " + $_.Exception.Message) }
   $summary = if ($locked) {
-    'Locked by IT. ' + [string]$policy.lock_reason
+    'Locked by IT. Sign-in is blocked until unlock. Wi-Fi and Ethernet stay on. ' + [string]$policy.lock_reason
   } elseif ([bool]$policy.hold) {
     'On hold. Admin rights are off and USB storage is blocked.'
   } elseif ($policy.admin -eq 'standing') {
@@ -894,10 +1192,15 @@ if ($Enforce) {
   exit 0
 }
 
+if ($Watch) {
+  Invoke-Watch
+  exit 0
+}
+
 if ($Sample) {
   try {
     $samplePolicy = Get-Policy (Get-AgentConfig)
-    if ([bool]$samplePolicy.locked) { Lock-InteractiveSession }
+    if ([bool]$samplePolicy.locked) { & "$env:SystemRoot\System32\logoff.exe" }
   } catch { }
   try { Add-ActivitySample } catch {
     Write-AgentLog ("Activity sample failed: " + $_.Exception.Message)
@@ -928,7 +1231,7 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock works like Win+L. It does not read files, capture the screen, record the keyboard, or use GPS.'
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock blocks sign-in until IT unlocks it. Wi-Fi and Ethernet stay on. It does not read files, capture the screen, record the keyboard, or use GPS.'
 $intro.Size = New-Object System.Drawing.Size(460, 112)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
@@ -1003,8 +1306,12 @@ function Update-Window {
       default { 'Standard user' }
     }
     $script:sessionLocked = [bool]$policy.locked
-    if ($script:sessionLocked) { Lock-InteractiveSession }
-    $holdText = if ($script:sessionLocked) { 'Locked by IT. ' + [string]$policy.lock_reason }
+    if ($script:sessionLocked -and -not $script:lockSigningOut) {
+      $script:lockSigningOut = $true
+      [System.Windows.Forms.MessageBox]::Show('This computer is locked by IT. You cannot sign in again until an administrator unlocks it. Wi-Fi and Ethernet stay connected.', 'Mulk Agent')
+      & "$env:SystemRoot\System32\logoff.exe"
+    }
+    $holdText = if ($script:sessionLocked) { 'Locked by IT. Sign-in stays blocked until unlock. ' + [string]$policy.lock_reason }
       elseif ([bool]$policy.hold) { 'On hold. ' + [string]$policy.hold_reason }
       else { 'Not locked' }
     $network = 'Network location is sent to IT.'
@@ -1048,21 +1355,15 @@ $ask.Add_Click({
 
 $refresh.Add_Click({ Update-Window })
 $script:sessionLocked = $false
+$script:lockSigningOut = $false
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 60000
 $timer.Add_Tick({
   try { Add-ActivitySample } catch { }
   Update-Window
 })
-$lockTimer = New-Object System.Windows.Forms.Timer
-$lockTimer.Interval = 20000
-$lockTimer.Add_Tick({
-  if ($script:sessionLocked) { Lock-InteractiveSession }
-})
 $timer.Start()
-$lockTimer.Start()
 $form.Add_Shown({ Update-Window })
 [void]$form.ShowDialog()
 $timer.Stop()
-$lockTimer.Stop()
 $mutex.ReleaseMutex() | Out-Null

@@ -132,7 +132,7 @@ export async function dashboardView(main) {
             <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.lock_reason || '')}</div></td>
           </tr>`;
         }).join('')}
-      </tbody></table></div>` : '<div class="empty">No asset is locked. In Control, Lock asset stops company use. On a Windows computer, Mulk Agent also locks the session.</div>'}
+      </tbody></table></div>` : '<div class="empty">No asset is locked. In Control, Lock asset stops sign-in until you unlock it. Wi-Fi and Ethernet stay connected.</div>'}
     </div>
     <div class="grid-2" style="margin-bottom:16px">
       <div class="card">

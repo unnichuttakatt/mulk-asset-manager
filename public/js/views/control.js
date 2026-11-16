@@ -920,8 +920,8 @@ function detail(a) {
       <div>
         <h2 style="margin-bottom:8px">Lock</h2>
         ${c.locked
-          ? `<p style="margin:0 0 10px">Locked${c.lock_reason ? ': ' + esc(c.lock_reason) : ''}. ${computer ? 'Mulk Agent locks the Windows session until you unlock it, and locks it again if the person signs back in.' : 'This asset should not be used until you unlock it.'} A lock does not wipe the computer.</p><button type="button" class="btn sm" data-act="unlock">Unlock asset</button>`
-          : `<p class="muted" style="margin:0 0 10px">A lock stops company use until you unlock it. On a Windows laptop or desktop, Mulk Agent locks the session the same way as Win+L. It does not read files, capture the screen, or record the keyboard. A lock does not wipe the computer.</p><button type="button" class="btn sm danger" data-act="lock">Lock asset</button>`}
+          ? `<p style="margin:0 0 10px">Locked${c.lock_reason ? ': ' + esc(c.lock_reason) : ''}. ${computer ? 'Nobody can sign in to this computer until you unlock it. Wi-Fi and Ethernet stay on so it keeps reaching this dashboard.' : 'This asset should not be used until you unlock it.'} A lock does not wipe the computer.</p><button type="button" class="btn sm" data-act="unlock">Unlock asset</button>`
+          : `<p class="muted" style="margin:0 0 10px">A lock stops company use until you unlock it. On a Windows laptop or desktop, nobody can sign in again until you choose Unlock. Wi-Fi and Ethernet are kept on, so turning them off does not drop the dashboard connection. It does not read files, capture the screen, or record the keyboard. A lock does not wipe the computer.</p><button type="button" class="btn sm danger" data-act="lock">Lock asset</button>`}
       </div>
       <div>
         <h2 style="margin-bottom:8px">Hold</h2>
@@ -1004,7 +1004,7 @@ async function act(main, asset, kind) {
         title: 'Lock asset',
         submit: 'Lock',
         danger: true,
-        body: `<p style="margin:0">The person should be able to read this reason. On a Windows computer, Mulk Agent locks the session until you unlock it. A lock does not wipe the computer.</p>
+        body: `<p style="margin:0">The person should be able to read this reason. On a Windows computer, sign-in is blocked until you unlock it. Wi-Fi and Ethernet stay connected so the unlock can reach the computer. A lock does not wipe the computer.</p>
           <label class="f">Reason<textarea name="reason" required placeholder="Why this ${esc(noun)} is locked"></textarea></label>`,
         onSubmit(form) {
           reason = form.reason.value.trim();
