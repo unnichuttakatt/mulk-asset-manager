@@ -16,7 +16,7 @@ create table if not exists public.app_admins (
 );
 
 -- >>> CHANGE / ADD YOUR ADMIN E-MAILS HERE <<<
-insert into public.app_admins (email) values ('unni@mulkholdings.com')
+insert into public.app_admins (email) values ('unnichuttakatt@gmail.com')
 on conflict do nothing;
 
 create or replace function public.is_admin()

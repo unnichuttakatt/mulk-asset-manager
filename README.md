@@ -31,8 +31,7 @@ vercel.json          tells Vercel to serve the public/ folder
    - Region: **Mumbai (ap-south-1)** is the closest to the UAE.
 2. Open **SQL Editor → New query**.
 3. Open `supabase/schema.sql`. Near the top, find the line
-   `insert into public.app_admins (email) values ('unni@mulkholdings.com')`
-   and add any other IT admin e-mails, separated by commas, e.g. `('unni@mulkholdings.com'), ('it@mulkholdings.com')`.
+   `insert into public.app_admins (email) values ('unnichuttakatt@gmail.com')`.
 4. Paste the whole file into the editor and click **Run**. You should see "Success. No rows returned".
 5. **Turn off public sign-up.** Go to **Authentication → Sign In / Providers** and switch off **Allow new users to sign up**. Keep the Email provider switched on.
 6. **Create your own login.** Go to **Authentication → Users → Add user → Create new user**. Enter your e-mail and a password, and tick **Auto Confirm User**.
