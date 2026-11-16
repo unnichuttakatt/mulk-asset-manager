@@ -11,7 +11,7 @@ A replacement for AssetTiger: a web app hosted on **Vercel** that stores its dat
 - Reports in Excel: full register, assets by employee, department summary, category × status, repairs and disposals, and activity for a date range
 - An employee lookup, useful when someone joins or leaves
 - Login for IT admins only, with an allow-list you manage on the **Admins** page
-- A **Laptop control** tab for company laptops already in the register: standard user by default, timed admin rights, a named standing exception, data-leaving rules, and a hold the person can be shown. It records the decision only. It does not record keystrokes, screenshots, or file contents.
+- A **Control** tab for every asset in the register. Laptops and desktops get admin rights and data-leaving rules. Printers get a queue mode. Phones get an enrollment mark. Other assets are controlled by who holds them and whether they are on hold. The page records the decision. It does not record keystrokes, screenshots, or location.
 
 There is no build step. The project is plain HTML/JS, and all libraries are included in `public/vendor`.
 
@@ -91,7 +91,7 @@ You can run the import again whenever you like while both systems are in use. Ex
 | Add a new purchase | **Add asset** → **Suggest** fills the next tag in your numbering pattern (e.g. `MH/LAP/2026/HZF/114`) |
 | Print stickers | Tick assets on the **Assets** page → **Print QR labels**, or use the **QR labels** page |
 | Add another IT admin | **Admins → Add admin**, then in Supabase: **Authentication → Users → Add user → Send invitation** |
-| Set admin rights or data-leaving rules on a laptop | **Laptop control**. Pick the laptop, grant a timed window or a standing exception with a reason, choose a rule set, or place it on hold |
+| Set admin rights, printer mode, or a hold | **Control**. Pick the asset. Computers can get a timed admin window. Printers get a queue mode. Mark a computer, printer, or phone enrolled only after the person has completed the visible enrollment |
 
 Status and assignment change only through the action buttons. That way every change appears in the history.
 
@@ -99,7 +99,7 @@ Status and assignment change only through the action buttons. That way every cha
 
 - **Security:** only signed-in users whose e-mail is on the Admins list can read or change data. This is enforced inside the database (row level security), not only in the browser. The anon key is designed to be public.
 - **Free tier:** Supabase pauses a free project after about a week with no use. You can restore it with one click, and no data is lost. For daily company use, the Pro plan (~$25/month) avoids pausing and adds daily backups. Vercel's free Hobby plan is for non-commercial use, so for company use choose Vercel Pro, or host on a team account.
-- **Laptop control storage:** if that tab says shared storage is not set up, open Supabase → SQL Editor and run `supabase/laptop-control.sql` once. Until then, decisions stay in the browser you are using. A fresh run of `schema.sql` already includes these tables.
+- **Control storage:** if that tab says shared storage is not set up, open Supabase → SQL Editor and run `supabase/laptop-control.sql` once. Until then, decisions stay in the browser you are using. A fresh run of `schema.sql` already includes these tables. Re-run the same file if the tab asks for the connection columns.
 - **Backups:** **Reports → Full asset register** downloads everything to Excel. Do this regularly if you stay on the free plan.
 - **Label printers:** the Medium size fits Brother DK 62 mm tape. The Large size fits A4 sheets with 24 labels (70 × 37 mm). In the print dialog, set margins to *None* and scale to *100%*.
 

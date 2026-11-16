@@ -46,3 +46,14 @@ create policy admins_all on public.laptop_control_events
 revoke all on public.laptop_controls, public.laptop_control_events from anon;
 grant select, insert, update, delete on public.laptop_controls, public.laptop_control_events to authenticated;
 grant usage, select on sequence public.laptop_control_events_id_seq to authenticated;
+
+-- Connection and printer mode. Safe if the tables were created by an earlier run.
+alter table public.laptop_controls add column if not exists connection text not null default 'not_connected';
+alter table public.laptop_controls drop constraint if exists laptop_controls_connection_check;
+alter table public.laptop_controls add constraint laptop_controls_connection_check
+  check (connection in ('not_connected','enrolled'));
+
+alter table public.laptop_controls add column if not exists print_mode text not null default 'open';
+alter table public.laptop_controls drop constraint if exists laptop_controls_print_mode_check;
+alter table public.laptop_controls add constraint laptop_controls_print_mode_check
+  check (print_mode in ('open','release','mono','stopped'));

@@ -13,7 +13,7 @@ const app = document.getElementById('app');
 const NAV = [
   ['/', 'Dashboard', 'dash'],
   ['/assets', 'Assets', 'box'],
-  ['/control', 'Laptop control', 'shield'],
+  ['/control', 'Control', 'shield'],
   ['/assets/new', 'Add asset', 'plus'],
   ['/activity', 'Activity', 'clock'],
   ['/reports', 'Reports', 'chart'],
