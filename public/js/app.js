@@ -160,7 +160,7 @@ function renderShell() {
         ${brand()}
         <nav class="nav">${NAV.map(([p, l, i]) => `<a href="#${p}" data-path="${p}">${icon(i)}<span>${l}</span></a>`).join('')}</nav>
         <div class="foot">${esc(ctx.user?.email || '')}<br>
-          <a class="btn sm" href="/agent/install.ps1" download="MulkAgent-install.ps1">Download agent</a>
+          <a class="btn sm" href="/agent/MulkAgentSetup.exe" download="MulkAgentSetup.exe">Download agent</a>
           <button class="btn sm" id="changepw" type="button">${icon('edit')} Change password</button>
           <button class="btn sm" id="signout" type="button">${icon('out')} Sign out</button></div>
       </aside>

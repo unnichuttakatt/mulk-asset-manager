@@ -2215,7 +2215,7 @@ grant execute on function public.agent_finish_support(text, uuid, boolean, text)
 
 notify pgrst, 'reload schema';
 
--- A computer left unlocked and unused for more than 2 hours.
+-- A computer still running after office hours, 8:00 AM to 6:00 PM.
 -- Run once after it-admin.sql. Safe to re-run.
 -- The screen and the keyboard are not collected.
 
@@ -2238,7 +2238,7 @@ begin
     raise exception 'This computer is not enrolled';
   end if;
   if p_idle_seconds is null or p_idle_seconds < 7200 or p_idle_seconds > 2592000 then
-    raise exception 'Unattended time must be at least 2 hours';
+    raise exception 'The computer must still be on for at least 2 hours after 6:00 PM';
   end if;
   v_date := btrim(coalesce(p_local_date, ''));
   if v_date !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' then
@@ -2247,7 +2247,7 @@ begin
   perform public.raise_compliance(
     dev.asset_id,
     'unattended',
-    'Left unlocked and unused for more than 2 hours on ' || v_date || '. The person is reminded to lock Windows when they step away.'
+    'Still on after office hours (8:00 AM to 6:00 PM) on ' || v_date || '. The person is reminded to shut the computer down when leaving the office.'
   );
   update public.agent_devices set last_seen = now() where id = dev.id;
 end;

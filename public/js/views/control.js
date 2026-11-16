@@ -616,7 +616,7 @@ function paint(main) {
         <p>${ui.assets.length} active asset${ui.assets.length === 1 ? '' : 's'} from the register. One list for laptops, desktops, printers, phones, and everything else.</p>
       </div>
       <div class="row">
-        <a class="btn primary" href="/agent/install.ps1" download="MulkAgent-install.ps1">Download Mulk Agent</a>
+        <a class="btn primary" href="/agent/MulkAgentSetup.exe" download="MulkAgentSetup.exe">Download Mulk Agent</a>
         <button type="button" class="btn ${helpWaiting().length ? 'primary' : ''}" id="open-help">Remote help (${helpWaiting().length})</button>
         <button type="button" class="btn ${pending().length ? 'primary' : ''}" id="open-requests">Admin requests (${pending().length})</button>
       </div>
@@ -1191,8 +1191,8 @@ async function denyRequest(main, id) {
   } catch (err) { toast(err.message || String(err), true); }
 }
 
-function downloadText(name, text) {
-  const blob = new Blob([text], { type: 'text/plain' });
+function downloadBlob(name, bytes, type) {
+  const blob = new Blob([bytes], { type });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
@@ -1200,18 +1200,84 @@ function downloadText(name, text) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(data) {
+  let c = 0xffffffff;
+  for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function zipStore(files) {
+  const enc = new TextEncoder();
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = enc.encode(file.name);
+    const crc = crc32(file.data);
+    const local = new Uint8Array(30 + name.length);
+    const view = new DataView(local.buffer);
+    view.setUint32(0, 0x04034b50, true);
+    view.setUint16(4, 20, true);
+    view.setUint16(8, 0, true);
+    view.setUint32(14, crc, true);
+    view.setUint32(18, file.data.length, true);
+    view.setUint32(22, file.data.length, true);
+    view.setUint16(26, name.length, true);
+    local.set(name, 30);
+    parts.push(local, file.data);
+    const cen = new Uint8Array(46 + name.length);
+    const cenView = new DataView(cen.buffer);
+    cenView.setUint32(0, 0x02014b50, true);
+    cenView.setUint16(4, 20, true);
+    cenView.setUint16(6, 20, true);
+    cenView.setUint32(16, crc, true);
+    cenView.setUint32(20, file.data.length, true);
+    cenView.setUint32(24, file.data.length, true);
+    cenView.setUint16(28, name.length, true);
+    cenView.setUint32(42, offset, true);
+    cen.set(name, 46);
+    central.push(cen);
+    offset += local.length + file.data.length;
+  }
+  const centralSize = central.reduce((n, part) => n + part.length, 0);
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, files.length, true);
+  endView.setUint16(10, files.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, offset, true);
+  const chunks = [...parts, ...central, end];
+  const out = new Uint8Array(chunks.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const chunk of chunks) { out.set(chunk, at); at += chunk.length; }
+  return out;
+}
+
 async function downloadSetup(asset) {
   const code = await store.db.rpc('agent_create_code', { p_asset_id: asset.id });
   const text = String(code || '').replace(/^"|"$/g, '');
   const safeTag = String(asset.tag || 'computer').replace(/[^\w.-]+/g, '_');
-  const body = `# Mulk Agent setup for ${asset.tag}
-# Run this file from an Administrator PowerShell. The code works once and expires in 24 hours.
-$dest = Join-Path $env:TEMP 'MulkAgent-install.ps1'
-Invoke-WebRequest 'https://mulk-asset-manager.vercel.app/agent/install.ps1' -OutFile $dest -UseBasicParsing
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dest -Code '${text.replace(/'/g, '')}'
-`;
-  downloadText(`MulkAgent-${safeTag}.ps1`, body);
-  toast('Setup file downloaded. Run it as Administrator on that computer.');
+  const response = await fetch('/agent/MulkAgentSetup.exe');
+  if (!response.ok) throw new Error('The setup program could not be downloaded.');
+  const exe = new Uint8Array(await response.arrayBuffer());
+  if (exe.length < 64 || exe[0] !== 0x4d || exe[1] !== 0x5a) throw new Error('The setup program is not a Windows executable.');
+  const zip = zipStore([
+    { name: 'MulkAgentSetup.exe', data: exe },
+    { name: 'code.txt', data: new TextEncoder().encode(text + '\r\n') },
+  ]);
+  downloadBlob(`MulkAgent-${safeTag}.zip`, zip, 'application/zip');
+  toast('Setup downloaded. Unzip it and run MulkAgentSetup.exe. The code is already filled in.');
 }
 
 async function askLocalPassword(main, asset) {
@@ -1358,16 +1424,14 @@ async function askSupport(main, asset) {
 async function askForAgentCode(asset) {
   const code = await store.db.rpc('agent_create_code', { p_asset_id: asset.id });
   const text = String(code || '').replace(/^"|"$/g, '');
-  const command = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://mulk-asset-manager.vercel.app/agent/install.ps1 | iex"';
   await modal({
     title: 'Mulk Agent code',
-    submit: 'Copy code and command',
+    submit: 'Copy code',
     cancel: 'Close',
-    body: `<p style="margin:0">On that Windows computer, open PowerShell as Administrator, run the command, and type this code. It works once and expires in 24 hours.</p>
+    body: `<p style="margin:0">Download <a href="/agent/MulkAgentSetup.exe">Mulk Agent setup</a>, run MulkAgentSetup.exe, and type this code. It works once and expires in 24 hours.</p>
       <p class="mono" style="font-size:28px;letter-spacing:.18em;margin:12px 0">${esc(text)}</p>
-      <p class="mono" style="margin:0">${esc(command)}</p>
       <p class="muted" style="margin:8px 0 0">The installer page is <a href="/agent/" target="_blank" rel="noopener">/agent/</a>. If creating a code fails, run supabase/agent.sql in the Supabase SQL editor. Run supabase/laptop-control.sql first if you have not.</p>`,
-    async onSubmit() { await navigator.clipboard.writeText(text + '\n' + command); },
+    async onSubmit() { await navigator.clipboard.writeText(text); },
   });
   toast('Install code created');
 }

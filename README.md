@@ -98,13 +98,13 @@ You can run the import again whenever you like while both systems are in use. Ex
 | See active hours, app time, and searches | **Usage**, or the asset page. Active time counts while someone is at the computer. The search log is the query text only |
 | See installed software | Open the asset, or **Alerts** and choose the computer. The list is program name, version, and publisher |
 | Review a new install | **Alerts**. The first scan from a computer is the baseline and is not an alert. A program installed after that stays open until you mark it reviewed |
-| Download Mulk Agent | After you sign in, **Download agent** in the sidebar, or **Download Mulk Agent** on **Control**. For one computer, open it in Control and choose **Download setup for this computer** |
+| Download Mulk Agent | After you sign in, **Download agent** in the sidebar, or **Download Mulk Agent** on **Control**. That downloads `MulkAgentSetup.exe`. For one computer, open it in Control and choose **Download setup for this computer**. Unzip that file and run the setup program |
 | Lock an asset | **Control**, open the asset, **Lock asset**, and write the reason. On a Windows laptop or desktop, nobody can sign in until you choose **Unlock asset**. Wi-Fi and Ethernet stay on so the computer keeps reaching the dashboard. Checking that asset out is refused while it is locked. A lock does not wipe the computer |
 | Change a computer's local Administrator password | **Control**, open the computer, **Change local admin password**. It is applied once, then deleted from the database. The account is not enabled by this change |
 | Install software on a laptop | **Control**, open the computer, **Install software**, and paste an `https://` link that ends in `.msi` or `.exe` |
 | Help someone on their screen | The person chooses **Request remote help** in the Mulk Agent window. On the **Dashboard** or in **Control**, choose **Connect**. On your own PC, open Quick Assist, choose Help someone, and paste the code, or leave it blank and read it to them. Their computer asks them to choose **Allow** before Quick Assist opens. The screen is not saved here |
 | See health or a quiet computer | **Alerts**. Encryption, Defender, firewall, low disk, a serial mismatch, a banned program, and changes to local administrators or startup names are listed. A computer not seen for about a day is shown from its last check-in |
-| A computer left unlocked | **Alerts**. If a signed-in computer is unlocked and unused for more than 2 hours, IT is told and the person sees an office reminder to lock Windows the next time they use it. Locking the screen is not an alert. The screen and keyboard are not collected |
+| A computer left on after work | **Alerts**. Office hours are 8:00 AM to 6:00 PM. If a computer is still on after 6:00 PM, IT is told and the person sees a reminder to shut it down the next time they use it. The screen and keyboard are not collected |
 
 Status and assignment change only through the action buttons. That way every change appears in the history.
 

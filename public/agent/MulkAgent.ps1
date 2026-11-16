@@ -5,8 +5,8 @@
 # It does not record keystrokes, screenshots, documents, page contents, or GPS.
 # A lock blocks Windows sign-in until IT unlocks it. Wi-Fi and Ethernet stay on.
 # IT can ask to open Windows Quick Assist. The person must choose Allow first.
-# A computer left unlocked and unused for more than 2 hours reminds the person
-# the next time they use it, and tells IT. Locking the screen is not an alert.
+# A computer still running after 6:00 PM reminds the person, the next time they
+# use it, to shut down when leaving. Office hours are 8:00 AM to 6:00 PM.
 # The screen is not saved, and the keyboard is not recorded.
 param(
   [switch]$Enforce,
@@ -366,17 +366,40 @@ function Test-WorkstationLocked {
 
 function Read-UnattendedState {
   $path = Join-Path $Root 'unattended.json'
-  $empty = @{ reported = $false; notice = $false }
+  $empty = @{ reported = $false; notice = $false; night = '' }
   if (-not (Test-Path $path)) { return $empty }
   try {
     $raw = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
-    return @{ reported = [bool]$raw.reported; notice = [bool]$raw.notice }
+    return @{ reported = [bool]$raw.reported; notice = [bool]$raw.notice; night = [string]$raw.night }
   } catch { return $empty }
 }
 
 function Save-UnattendedState($state) {
-  $json = '{"reported":' + $(if ($state.reported) { 'true' } else { 'false' }) + ',"notice":' + $(if ($state.notice) { 'true' } else { 'false' }) + '}'
+  $night = ([string]$state.night) -replace '[^0-9-]', ''
+  $json = '{"reported":' + $(if ($state.reported) { 'true' } else { 'false' }) + ',"notice":' + $(if ($state.notice) { 'true' } else { 'false' }) + ',"night":"' + $night + '"}'
   Set-Content -Path (Join-Path $Root 'unattended.json') -Value $json -Encoding UTF8
+}
+
+function Get-OfficeCloseDate {
+  $now = Get-Date
+  $day = if ($now.Hour -lt 8) { $now.AddDays(-1) } else { $now }
+  return $day.ToString('yyyy-MM-dd')
+}
+
+function Get-SecondsPastOfficeClose {
+  $now = Get-Date
+  $mins = $now.Hour * 60 + $now.Minute
+  if ($mins -ge 480 -and $mins -lt 1200) { return 0 }
+  $close = (Get-Date).Date.AddHours(18)
+  if ($now.Hour -lt 8) { $close = $close.AddDays(-1) }
+  try {
+    $boot = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+  } catch { return 0 }
+  if (-not $boot -or $boot -ge $close) { return 0 }
+  $past = [int]($now - $close).TotalSeconds
+  if ($past -lt 7200) { return 0 }
+  if ($past -gt 2592000) { return 2592000 }
+  return $past
 }
 
 function Show-OfficeStandard {
@@ -385,7 +408,7 @@ function Show-OfficeStandard {
   try {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
     [System.Windows.Forms.MessageBox]::Show(
-      "This computer was left signed in and unlocked, with nobody using it, for more than 2 hours.`r`n`r`nOffice standard: lock Windows before you leave your desk. Press the Windows key and L, or sign out. An unlocked computer can be used by someone else.`r`n`r`nIT has been told. This reminder does not include the screen or anything typed.",
+      "This computer was still running after office hours.`r`n`r`nOffice hours are 8:00 AM to 6:00 PM. Shut the computer down when you leave the office. Leaving it on after 6:00 PM uses power and leaves it available overnight.`r`n`r`nIT has been told. This reminder does not include the screen or anything typed.",
       'Office standard'
     ) | Out-Null
     return $true
@@ -394,45 +417,63 @@ function Show-OfficeStandard {
   }
 }
 
-function Update-Unattended {
-  $idle = Get-IdleSeconds
-  $locked = Test-WorkstationLocked
-  $state = Read-UnattendedState
-  if ($locked) {
-    if (-not $state.notice) { $state.reported = $false }
-    Save-UnattendedState $state
-    return
+function Publish-LeftOn($Config, [int]$Seconds, [string]$Night) {
+  Invoke-AgentRpc $Config 'agent_report_unattended' @{
+    p_token = [string]$Config.token
+    p_idle_seconds = [int]$Seconds
+    p_local_date = $Night
   }
-  if ($idle -ge 7200) {
-    if (-not $state.reported) {
-      $config = Get-AgentConfig
-      $sent = $idle
-      if ($sent -gt 2592000) { $sent = 2592000 }
-      Invoke-AgentRpc $config 'agent_report_unattended' @{
-        p_token = [string]$config.token
-        p_idle_seconds = [int]$sent
-        p_local_date = (Get-Date).ToString('yyyy-MM-dd')
-      }
+}
+
+function Update-Unattended {
+  $state = Read-UnattendedState
+  $night = Get-OfficeCloseDate
+  $past = Get-SecondsPastOfficeClose
+  $idle = 999999
+  try { $idle = Get-IdleSeconds } catch { }
+  if ($past -ge 7200 -and $idle -ge 180) {
+    if (-not $state.reported -or $state.night -ne $night) {
+      Publish-LeftOn (Get-AgentConfig) $past $night
       $state.reported = $true
       $state.notice = $true
+      $state.night = $night
       Save-UnattendedState $state
-      Write-AgentLog 'This computer was left unlocked and unused for more than 2 hours. The person will see the office reminder the next time they use it. The screen and keyboard were not collected.'
+      Write-AgentLog 'This computer was still on after 6:00 PM. Office hours are 8:00 AM to 6:00 PM. The person will be reminded to shut it down the next time they use it.'
     }
     return
   }
-  if ($idle -lt 180 -and $state.notice) {
+  if ($idle -lt 180 -and -not (Test-WorkstationLocked) -and $state.notice) {
     if (Show-OfficeStandard) {
       $state.notice = $false
-      $state.reported = $false
       Save-UnattendedState $state
-      Write-AgentLog 'Showed the office reminder to lock Windows when stepping away.'
+      Write-AgentLog 'Showed the office reminder to shut down when leaving. Office hours are 8:00 AM to 6:00 PM.'
     }
-    return
   }
-  if ($idle -lt 180 -and $state.reported) {
-    $state.reported = $false
-    Save-UnattendedState $state
-  }
+}
+
+function Test-SomeoneAtConsole {
+  try {
+    $out = & "$env:SystemRoot\System32\query.exe" user 2>$null
+    foreach ($line in @($out)) {
+      if ($line -match '\sActive\s') { return $true }
+    }
+  } catch { return $true }
+  return $false
+}
+
+function Update-LeftOnSystem($Config) {
+  if (Test-SomeoneAtConsole) { return }
+  $past = Get-SecondsPastOfficeClose
+  if ($past -lt 7200) { return }
+  $night = Get-OfficeCloseDate
+  $state = Read-UnattendedState
+  if ($state.reported -and $state.night -eq $night) { return }
+  Publish-LeftOn $Config $past $night
+  $state.reported = $true
+  $state.notice = $true
+  $state.night = $night
+  Save-UnattendedState $state
+  Write-AgentLog 'This computer was still on after office hours with nobody signed in. Office hours are 8:00 AM to 6:00 PM.'
 }
 
 function Get-ForegroundApp {
@@ -1289,6 +1330,9 @@ function Invoke-Watch {
   try {
     $policy = Get-Policy $config
     Sync-AssetLock $policy
+    if (-not [bool]$policy.locked) {
+      try { Update-LeftOnSystem $config } catch { Write-AgentLog ('Shutdown reminder failed: ' + $_.Exception.Message) }
+    }
   } catch {
     if (Test-Path $LockFlag) {
       try { Enable-CompanyNetwork } catch { }
@@ -1385,7 +1429,7 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock blocks sign-in until IT unlocks it. Wi-Fi and Ethernet stay on. If this computer is left unlocked and unused for more than 2 hours, you will see an office reminder the next time you use it. If you ask for remote help, IT can connect only after you choose Allow. Quick Assist then opens on this screen. The screen is not saved. It does not read files, capture the screen, record the keyboard, or use GPS.'
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can queue an installer, set the local Administrator password once, and lock this computer. A lock blocks sign-in until IT unlocks it. Wi-Fi and Ethernet stay on. If this computer is left running after office hours, 8:00 AM to 6:00 PM, you will be reminded to shut it down the next time you use it. If you ask for remote help, IT can connect only after you choose Allow. Quick Assist then opens on this screen. The screen is not saved. It does not read files, capture the screen, record the keyboard, or use GPS.'
 $intro.Size = New-Object System.Drawing.Size(460, 156)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
