@@ -57,6 +57,16 @@ export async function assetView(main, params, id) {
     store.db.select('assets', { id: 'eq.' + id, select: '*' }),
     store.db.select('asset_events', { asset_id: 'eq.' + id, select: '*', order: 'created_at.desc' }),
   ]);
+  let programs = [];
+  try {
+    programs = await store.db.select('installed_software', {
+      asset_id: 'eq.' + id,
+      removed_at: 'is.null',
+      select: 'name,version,publisher,installed_on,last_seen',
+      order: 'name.asc',
+      limit: '500',
+    }) || [];
+  } catch { programs = []; }
   const a = rows[0];
   if (!a) { main.innerHTML = '<div class="empty">Asset not found. <a href="#/assets">Back to assets</a></div>'; return; }
   loadAssets().catch(() => {});   // for suggestions in action forms
@@ -114,6 +124,18 @@ export async function assetView(main, params, id) {
         <div class="muted" style="font-size:12.5px">Scan with a phone camera to open this page.</div>
         <button class="btn" id="label">${icon('print')} Print label</button>
       </div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-h"><h2>Installed software</h2><a href="#/alerts?asset=${esc(a.id)}">${programs.length ? programs.length + ' installed' : 'Alerts'}</a></div>
+      ${programs.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Program</th><th>Version</th><th>Publisher</th><th>Installed</th><th>Last seen</th></tr></thead><tbody>
+        ${programs.map(p => `<tr>
+          <td>${esc(p.name)}</td>
+          <td class="sub">${esc(p.version || '')}</td>
+          <td class="sub">${esc(p.publisher || '')}</td>
+          <td class="sub">${fmtDate(p.installed_on)}</td>
+          <td class="sub">${fmtDateTime(p.last_seen)}</td>
+        </tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">No software list yet. On a laptop or desktop, Mulk Agent sends the Windows uninstall list: program name, version, and publisher. The first report is the baseline. A program installed after that is an alert.</div>'}
     </div>`;
 
   main.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {

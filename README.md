@@ -12,6 +12,7 @@ A replacement for AssetTiger: a web app hosted on **Vercel** that stores its dat
 - An employee lookup, useful when someone joins or leaves
 - Login for IT admins only, with an allow-list you manage on the **Admins** page
 - A **Control** tab for every asset in the register. Laptops and desktops get admin rights and data-leaving rules. Printers get a queue mode. Phones get an enrollment mark. Other assets are controlled by who holds them and whether they are on hold. The page records the decision. It does not record keystrokes, screenshots, or location.
+- An **Alerts** page for asset admins. Enrolled computers report installed software (name, version, publisher). The first scan is the baseline. A program installed later, or a removable drive, is reported here until an admin marks it reviewed. Documents are not collected.
 
 There is no build step. The project is plain HTML/JS, and all libraries are included in `public/vendor`.
 
@@ -91,7 +92,9 @@ You can run the import again whenever you like while both systems are in use. Ex
 | Print stickers | Tick assets on the **Assets** page → **Print QR labels**, or use the **QR labels** page |
 | Add another IT admin | **Admins → Add admin**, then in Supabase: **Authentication → Users → Add user → Send invitation** |
 | Approve a request for admin rights | **Control**. When someone asks, a popup lists the person, the computer, and the reason. Approve 1 hour, 4 hours, or until 18:00 GST, or deny it. The request itself never grants admin rights |
-| See a blocked copy | **Control → Copy activity**. The row shows the channel, the file name, the label, and whether it was blocked, warned, or quarantined. The file itself is not stored |
+| See a blocked copy | **Alerts**. A removable drive is reported by its letter and volume name. Clipboard, cloud, email, and print use the same queue when the agent reports them. The file itself is not stored |
+| See installed software | Open the asset, or **Alerts** and choose the computer. The list is program name, version, and publisher |
+| Review a new install | **Alerts**. The first scan from a computer is the baseline and is not an alert. A program installed after that stays open until you mark it reviewed |
 
 Status and assignment change only through the action buttons. That way every change appears in the history.
 
@@ -100,7 +103,7 @@ Status and assignment change only through the action buttons. That way every cha
 - **Security:** only signed-in users whose e-mail is on the Admins list can read or change data. This is enforced inside the database (row level security), not only in the browser. The anon key is designed to be public.
 - **Free tier:** Supabase pauses a free project after about a week with no use. You can restore it with one click, and no data is lost. For daily company use, the Pro plan (~$25/month) avoids pausing and adds daily backups. Vercel's free Hobby plan is for non-commercial use, so for company use choose Vercel Pro, or host on a team account.
 - **Control storage:** if that tab says shared storage is not set up, open Supabase → SQL Editor and run `supabase/laptop-control.sql` once. Until then, decisions stay in the browser you are using. A fresh run of `schema.sql` already includes these tables. Re-run the same file if the tab asks for the connection columns.
-- **Mulk Agent:** the Windows program for laptops and desktops. It does not need Intune. In **Control**, create a code, then on the computer run the installer from `/agent/` as Administrator. Run `supabase/agent.sql` once in Supabase first (and `supabase/laptop-control.sql` if you have not). The person sees a window named Mulk Agent. Macs are not covered by this installer.
+- **Mulk Agent:** the Windows program for laptops and desktops. It does not need Intune. In **Control**, create a code, then on the computer run the installer from `/agent/` as Administrator. Run `supabase/agent.sql` once in Supabase first (and `supabase/laptop-control.sql` if you have not), then `supabase/asset-admin.sql` so software and data-leaving reports have a place to land. The person sees a window named Mulk Agent. Macs are not covered by this installer. The agent reports installed programs and a removable drive. It does not read documents.
 - **Backups:** **Reports → Full asset register** downloads everything to Excel. Do this regularly if you stay on the free plan.
 - **Label printers:** the Medium size fits Brother DK 62 mm tape. The Large size fits A4 sheets with 24 labels (70 × 37 mm). In the print dialog, set margins to *None* and scale to *100%*.
 

@@ -142,6 +142,8 @@ const ui = {
   activity: [],
   agents: [],
   agentReady: true,
+  softwareOpen: [],
+  softwareReady: true,
   source: 'db',
   wide: true,
   controls: new Map(),
@@ -377,6 +379,23 @@ function agentFor(assetId) {
   return (ui.agents || []).find(a => a.asset_id === assetId) || null;
 }
 
+async function loadSoftwareAlerts() {
+  ui.softwareOpen = [];
+  ui.softwareReady = true;
+  if (ui.source !== 'db') { ui.softwareReady = false; return; }
+  try {
+    ui.softwareOpen = await store.db.select('software_events', {
+      select: 'id,asset_id,name,kind,happened_at',
+      acknowledged_at: 'is.null',
+      order: 'happened_at.desc',
+      limit: '50',
+    }) || [];
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+    ui.softwareReady = false;
+  }
+}
+
 function pending() {
   return ui.requests.filter(r => r.status === 'pending');
 }
@@ -454,12 +473,17 @@ let pollGen = 0;
 function watchRequests(main) {
   clearInterval(pollTimer);
   const gen = ++pollGen;
+  const seenSoftware = new Set(ui.softwareOpen.map(r => String(r.id)));
   pollTimer = setInterval(async () => {
     if (gen !== pollGen || !main.querySelector('#control-live') || document.querySelector('.modal-bg')) return;
     const seen = new Set(pending().map(r => String(r.id)));
-    try { await loadQueues(); await loadAgents(); } catch { return; }
-    if (pending().some(r => !seen.has(String(r.id)))) {
-      ui.showPopup = true;
+    try { await loadQueues(); await loadAgents(); await loadSoftwareAlerts(); } catch { return; }
+    const newSoftware = ui.softwareOpen.filter(r => !seenSoftware.has(String(r.id)));
+    newSoftware.forEach(r => seenSoftware.add(String(r.id)));
+    const newRequest = pending().some(r => !seen.has(String(r.id)));
+    if (newSoftware.length) toast(newSoftware.length === 1 ? `New program: ${newSoftware[0].name}` : `${newSoftware.length} program changes reported`);
+    if (newRequest || newSoftware.length) {
+      if (newRequest) ui.showPopup = true;
       paint(main);
     }
   }, 15000);
@@ -473,6 +497,7 @@ export async function controlView(main) {
     await loadControls();
     await loadQueues();
     await loadAgents();
+    await loadSoftwareAlerts();
     if (pending().length) ui.showPopup = true;
   } catch (err) {
     main.innerHTML = `<div class="page-head"><div><h1>Control</h1></div></div><div class="err">${esc(err.message || String(err))}</div>`;
@@ -579,7 +604,7 @@ function paint(main) {
       </tbody></table></div>` : '<div class="empty">No control decisions yet.</div>'}
     </div>
     <div class="card" style="margin-top:16px">
-      <div class="card-h"><h2>Copy activity</h2><span class="muted">File name and result only</span></div>
+      <div class="card-h"><h2>Copy activity</h2><a href="#/alerts">Open alerts</a></div>
       ${ui.activity.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Asset</th><th>Channel</th><th>File</th><th>Result</th></tr></thead><tbody>
         ${ui.activity.slice(0, 20).map(e => {
           const a = assetTag(e.asset_id);
@@ -632,6 +657,18 @@ function paint(main) {
       if (focusId === 'cq' && caret != null) el.setSelectionRange(caret, caret);
     }
   }
+}
+
+function softwareNote(asset) {
+  if (!ui.softwareReady) {
+    return '<p class="muted" style="margin:0">Run <span class="mono">supabase/asset-admin.sql</span> once so this computer can report its installed programs.</p>';
+  }
+  const open = ui.softwareOpen.filter(r => r.asset_id === asset.id);
+  const names = open.slice(0, 3).map(r => esc(r.name)).join(', ');
+  return `<p class="muted" style="margin:0 0 10px">${open.length
+    ? `${open.length} program change${open.length === 1 ? '' : 's'} waiting: ${names}${open.length > 3 ? '…' : ''}.`
+    : 'No new programs waiting. The first scan is the baseline. A program installed after that is reported on Alerts.'}</p>
+    <a class="btn sm" href="#/alerts?asset=${esc(asset.id)}">Review software</a>`;
 }
 
 function steps(kind) {
@@ -698,6 +735,10 @@ function detail(a) {
           <button type="button" class="btn sm primary" data-act="agent-code">Create Mulk Agent code</button>
           <a class="btn sm" href="/agent/" target="_blank" rel="noopener">Install steps</a>
         </div>
+      </div>
+      <div>
+        <h2 style="margin-bottom:8px">Installed software</h2>
+        ${softwareNote(a)}
       </div>
       <div>
         <h2 style="margin-bottom:8px">Admin rights</h2>

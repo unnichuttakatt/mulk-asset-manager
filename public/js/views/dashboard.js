@@ -20,6 +20,14 @@ export async function dashboardView(main) {
     loadAssets(true),
     store.db.select('asset_events', { select: 'id,action,event_date,assigned_to,created_at,performed_by,notes,asset_id,assets(tag,description)', order: 'created_at.desc', limit: '12' }),
   ]);
+  let software = [];
+  let copies = [];
+  try {
+    [software, copies] = await Promise.all([
+      store.db.select('software_events', { select: 'id,asset_id,name,kind,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }),
+      store.db.select('copy_activity', { select: 'id,asset_id,channel,file_name,action,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }),
+    ]);
+  } catch { software = []; copies = []; }
   const by = Object.fromEntries(countBy(assets, 'status'));
   const kpi = (status, label) => `
     <a class="card kpi" href="${status ? q({ status }) : '#/assets'}">
@@ -59,6 +67,32 @@ export async function dashboardView(main) {
           ${warranty.length ? `<h2 style="margin:18px 0 10px">Warranty ending in 60 days</h2><div class="bars">${warranty.slice(0, 6).map(a => `
             <a class="bar" style="grid-template-columns:1fr auto" href="#/asset/${a.id}"><span class="bar-name"><span class="tag">${esc(a.tag)}</span> <span class="muted">${esc(a.description || '')}</span></span><span class="muted">${fmtDate(a.warranty_expiry)}</span></a>`).join('')}</div>` : ''}
         </div></div>
+    </div>
+    <div class="grid-2" style="margin-bottom:16px">
+      <div class="card">
+        <div class="card-h"><h2>New programs</h2><a href="#/alerts">${software.length ? software.length + ' open' : 'Alerts'}</a></div>
+        ${software.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>
+          ${software.map(r => {
+            const asset = assets.find(a => a.id === r.asset_id);
+            return `<tr class="clickable" data-href="#/alerts?asset=${esc(r.asset_id)}">
+              <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.name)}</div></td>
+              <td><span class="badge ${r.kind === 'removed' ? 'st-under_repair' : 'st-checked_out'}">${r.kind === 'removed' ? 'Removed' : 'Installed'}</span></td>
+              <td class="sub">${fmtDateTime(r.happened_at)}</td></tr>`;
+          }).join('')}
+        </tbody></table></div>` : '<div class="empty">No new programs. Mulk Agent sends the uninstall list. The first scan is the baseline.</div>'}
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Data leaving</h2><a href="#/alerts">${copies.length ? copies.length + ' open' : 'Alerts'}</a></div>
+        ${copies.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>
+          ${copies.map(r => {
+            const asset = assets.find(a => a.id === r.asset_id);
+            return `<tr class="clickable" data-href="#/alerts">
+              <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.file_name)}</div></td>
+              <td><span class="badge ${r.action === 'warned' ? 'st-under_repair' : 'st-broken'}">${esc(r.action)}</span></td>
+              <td class="sub">${fmtDateTime(r.happened_at)}</td></tr>`;
+          }).join('')}
+        </tbody></table></div>` : '<div class="empty">No open data-leaving reports. A removable drive is reported by its letter and volume name.</div>'}
+      </div>
     </div>
     <div class="card">
       <div class="card-h"><h2>Recent activity</h2><a href="#/activity">View all</a></div>
