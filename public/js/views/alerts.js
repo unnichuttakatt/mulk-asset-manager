@@ -5,8 +5,8 @@
 import { store, loadAssets, ctx } from '../data.js';
 import { esc, fmtDate, fmtDateTime, toast } from '../ui.js';
 
-const CHANNELS = { usb: 'USB drive', clipboard: 'Clipboard', cloud: 'Personal cloud', mail: 'Outside email', print: 'Print' };
-const COPY_ACTIONS = { blocked: 'Blocked', warned: 'Warned', quarantined: 'Quarantined' };
+const CHANNELS = { usb: 'USB', clipboard: 'Clipboard', cloud: 'Personal cloud', mail: 'Outside email', print: 'Print' };
+const COPY_ACTIONS = { blocked: 'Blocked', warned: 'Warned', quarantined: 'Quarantined', plugged: 'Plugged' };
 
 const ui = {
   ready: true,
@@ -15,6 +15,7 @@ const ui = {
   programs: [],
   software: [],
   copies: [],
+  places: [],
   assets: [],
 };
 
@@ -45,17 +46,22 @@ async function load() {
       softwareQuery.acknowledged_at = 'is.null';
       copyQuery.acknowledged_at = 'is.null';
     }
-    const [software, copies] = await Promise.all([
+    const placeQuery = { select: 'id,asset_id,public_ip,local_ip,country_code,country_name,region_name,city,outside_uae,happened_at,acknowledged_at', outside_uae: 'eq.true', order: 'happened_at.desc', limit: '100' };
+    if (ui.openOnly) placeQuery.acknowledged_at = 'is.null';
+    const [software, copies, places] = await Promise.all([
       store.db.select('software_events', softwareQuery),
       store.db.select('copy_activity', copyQuery),
+      store.db.select('location_events', placeQuery),
     ]);
     ui.software = software || [];
     ui.copies = copies || [];
+    ui.places = places || [];
     ui.ready = true;
   } catch (err) {
     if (!missingTable(err)) throw err;
     ui.software = [];
     ui.copies = [];
+    ui.places = [];
     ui.ready = false;
   }
   await loadPrograms();
@@ -97,6 +103,7 @@ export async function alertsView(main, params) {
 function paint(main) {
   const openSoftware = ui.software.filter(r => !r.acknowledged_at).length;
   const openCopies = ui.copies.filter(r => !r.acknowledged_at).length;
+  const openPlaces = ui.places.filter(r => !r.acknowledged_at).length;
   const options = assetOptions().map(a => `<option value="${esc(a.id)}" ${a.id === ui.assetId ? 'selected' : ''}>${esc(a.tag)} · ${esc(a.assigned_to || a.description || '')}</option>`).join('');
   const selected = assetOf(ui.assetId);
 
@@ -108,13 +115,26 @@ function paint(main) {
       </div>
       <div class="row">
         <button type="button" class="btn" id="toggle-open">${ui.openOnly ? 'Show history' : 'Open only'}</button>
-        ${(openSoftware + openCopies) ? '<button type="button" class="btn primary" id="ack-all">Mark open as reviewed</button>' : ''}
+        ${(openSoftware + openCopies + openPlaces) ? '<button type="button" class="btn primary" id="ack-all">Mark open as reviewed</button>' : ''}
       </div>
     </div>
     ${ui.ready ? '' : `<div class="err" style="margin-bottom:16px"><strong>Software reports are not stored yet.</strong> Run <span class="mono">supabase/asset-admin.sql</span> once in the Supabase SQL editor. It is safe to re-run.</div>`}
     <div class="kpis">
+      <div class="card kpi"><div class="k-label">Outside UAE</div><div class="k-val">${openPlaces}</div></div>
+      <div class="card kpi"><div class="k-label">USB and data leaving</div><div class="k-val">${openCopies}</div></div>
       <div class="card kpi"><div class="k-label">New programs</div><div class="k-val">${openSoftware}</div></div>
-      <div class="card kpi"><div class="k-label">Data leaving</div><div class="k-val">${openCopies}</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-h"><h2>Outside the UAE</h2><span class="muted">City and country of the public IP</span></div>
+      ${ui.places.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Asset</th><th>Place</th><th>Public IP</th><th></th></tr></thead><tbody>
+        ${ui.places.map(r => `<tr>
+          <td>${fmtDateTime(r.happened_at)}</td>
+          <td><a href="#/asset/${esc(r.asset_id)}">${tagOf(r.asset_id)}</a></td>
+          <td>${esc([r.city, r.region_name, r.country_name || r.country_code].filter(Boolean).join(', '))}</td>
+          <td class="mono">${esc(r.public_ip || '')}${r.local_ip ? `<div class="sub">Local ${esc(r.local_ip)}</div>` : ''}</td>
+          <td style="text-align:right">${r.acknowledged_at ? '<span class="muted">Reviewed</span>' : `<button type="button" class="btn sm" data-ack="location_events" data-id="${esc(r.id)}">Mark reviewed</button>`}</td>
+        </tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">No computer has reported a public IP outside the UAE. Location is the city and country of that IP, not a GPS reading.</div>'}
     </div>
     <div class="card" style="margin-bottom:16px">
       <div class="card-h"><h2>New or removed programs</h2><span class="muted">Name, version, and publisher only</span></div>
@@ -139,7 +159,7 @@ function paint(main) {
           <td><span class="badge ${r.action === 'warned' ? 'st-under_repair' : 'st-broken'}">${esc(COPY_ACTIONS[r.action] || r.action)}</span></td>
           <td style="text-align:right">${r.acknowledged_at ? '<span class="muted">Reviewed</span>' : `<button type="button" class="btn sm" data-ack="copy_activity" data-id="${esc(r.id)}">Mark reviewed</button>`}</td>
         </tr>`).join('')}
-      </tbody></table></div>` : '<div class="empty">No data-leaving reports yet. Mulk Agent reports a removable drive by its letter and volume name. It does not list the files on that drive. Clipboard, cloud, email, and print stay available when the agent reports them the same way: a name and a result.</div>'}
+      </tbody></table></div>` : '<div class="empty">No USB or data-leaving reports yet. A USB device plugged in after the first scan is listed here. Files on a drive are not listed.</div>'}
     </div>
     <div class="card">
       <div class="card-h"><h2>Installed software</h2><span class="muted">${selected ? esc(selected.tag) : 'Choose a computer'}</span></div>
@@ -170,6 +190,7 @@ function paint(main) {
       const jobs = [];
       for (const r of ui.software) if (!r.acknowledged_at) jobs.push(acknowledge('software_events', r.id));
       for (const r of ui.copies) if (!r.acknowledged_at) jobs.push(acknowledge('copy_activity', r.id));
+      for (const r of ui.places) if (!r.acknowledged_at) jobs.push(acknowledge('location_events', r.id));
       await Promise.all(jobs);
       toast('Marked as reviewed');
       await refresh(main);
@@ -203,13 +224,22 @@ let pollGen = 0;
 function watch(main) {
   clearInterval(pollTimer);
   const gen = ++pollGen;
-  const seen = new Set([...ui.software, ...ui.copies].filter(r => !r.acknowledged_at).map(r => String(r.id)));
+  const alertKey = (kind, id) => kind + ':' + id;
+  const seen = new Set([
+    ...ui.software.filter(r => !r.acknowledged_at).map(r => alertKey('s', r.id)),
+    ...ui.copies.filter(r => !r.acknowledged_at).map(r => alertKey('c', r.id)),
+    ...ui.places.filter(r => !r.acknowledged_at).map(r => alertKey('p', r.id)),
+  ]);
   pollTimer = setInterval(async () => {
     if (gen !== pollGen || !main.querySelector('#sw-asset') || document.querySelector('.modal-bg')) return;
     try { await load(); } catch { return; }
-    const fresh = [...ui.software, ...ui.copies].filter(r => !r.acknowledged_at && !seen.has(String(r.id)));
+    const fresh = [
+      ...ui.software.filter(r => !r.acknowledged_at).map(r => alertKey('s', r.id)),
+      ...ui.copies.filter(r => !r.acknowledged_at).map(r => alertKey('c', r.id)),
+      ...ui.places.filter(r => !r.acknowledged_at).map(r => alertKey('p', r.id)),
+    ].filter(key => !seen.has(key));
     if (fresh.length) {
-      fresh.forEach(r => seen.add(String(r.id)));
+      fresh.forEach(key => seen.add(key));
       toast(fresh.length === 1 ? 'New report from a computer' : `${fresh.length} new reports from computers`);
       paint(main);
     }

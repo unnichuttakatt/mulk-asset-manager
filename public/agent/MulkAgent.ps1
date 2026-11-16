@@ -1,6 +1,7 @@
 # Mulk Agent. A visible company program for one Windows computer.
 # It shows the rules, sends an admin request, and applies the decision IT approved.
-# It does not record keystrokes, screenshots, or file contents.
+# It reports installed programs, USB devices, and the public IP city/country.
+# It does not record keystrokes, screenshots, documents, or GPS.
 param(
   [switch]$Enforce
 )
@@ -104,39 +105,134 @@ function Send-SoftwareInventory($Config) {
   }
 }
 
+function Get-UsbDevices([string]$Mode) {
+  $items = @()
+  $seen = @{}
+  $devices = @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object {
+    $_.PNPDeviceID -like 'USB\*' -and $_.Name -and $_.Name -notmatch 'Root Hub|Host Controller|USB Hub'
+  })
+  foreach ($device in $devices) {
+    $name = ([string]$device.Name).Trim()
+    $id = ([string]$device.PNPDeviceID).Trim().ToLower()
+    if (-not $name -or -not $id -or $seen.ContainsKey($id)) { continue }
+    $seen[$id] = $true
+    if ($name.Length -gt 160) { $name = $name.Substring(0, 160) }
+    $items += @{ key = 'pnp|' + $id; name = $name; label = 'USB device'; action = 'plugged' }
+  }
+  $drives = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=2' -ErrorAction SilentlyContinue)
+  foreach ($drive in $drives) {
+    $letter = [string]$drive.DeviceID
+    $label = ([string]$drive.VolumeName).Trim()
+    $key = 'vol|' + $letter.ToLower() + '|' + $label.ToLower()
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    $file = if ($label) { "USB drive $letter $label" } else { "USB drive $letter" }
+    if ($file.Length -gt 160) { $file = $file.Substring(0, 160) }
+    $action = switch ($Mode) { 'block' { 'blocked' } 'read' { 'warned' } default { 'plugged' } }
+    $items += @{ key = $key; name = $file; label = 'Removable storage'; action = $action }
+  }
+  return $items
+}
+
 function Send-UsbNotices($Config, $Policy) {
   $mode = [string]$Policy.usb
-  if ($mode -ne 'block' -and $mode -ne 'read') { return }
   $statePath = Join-Path $Root 'usb-seen.txt'
+  $baselinePath = Join-Path $Root 'usb-baseline.txt'
+  $items = @(Get-UsbDevices $mode)
   $seen = @{}
   if (Test-Path $statePath) {
     foreach ($line in @(Get-Content -Path $statePath -ErrorAction SilentlyContinue)) {
       if ($line) { $seen[$line] = $true }
     }
   }
-  $now = @{}
-  $drives = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=2' -ErrorAction SilentlyContinue)
-  foreach ($drive in $drives) {
-    $letter = [string]$drive.DeviceID
-    $label = ([string]$drive.VolumeName).Trim()
-    $key = $letter + '|' + $label
-    $now[$key] = $true
-    if ($seen.ContainsKey($key)) { continue }
-    $file = if ($label) { "USB drive $letter $label" } else { "USB drive $letter" }
-    if ($file.Length -gt 180) { $file = $file.Substring(0, 180) }
-    $action = if ($mode -eq 'block') { 'blocked' } else { 'warned' }
+  $baseline = Test-Path $baselinePath
+  $now = @()
+  $reported = 0
+  foreach ($item in $items) {
+    $now += [string]$item.key
+    if (-not $baseline) { continue }
+    if ($seen.ContainsKey([string]$item.key)) { continue }
     Invoke-AgentRpc $Config 'agent_report' @{
       p_token = $Config.token
       p_channel = 'usb'
-      p_file_name = $file
-      p_label = 'Removable storage'
-      p_action = $action
+      p_file_name = [string]$item.name
+      p_label = [string]$item.label
+      p_action = [string]$item.action
     }
-    Write-AgentLog "Reported $file as $action."
+    $reported += 1
+    Write-AgentLog ("USB " + $item.action + ": " + $item.name)
   }
-  $keys = @($now.Keys)
-  if ($keys.Count -eq 0) { Set-Content -Path $statePath -Value '' -Encoding UTF8 }
-  else { Set-Content -Path $statePath -Value $keys -Encoding UTF8 }
+  if ($now.Count -eq 0) { Set-Content -Path $statePath -Value '' -Encoding UTF8 }
+  else { Set-Content -Path $statePath -Value $now -Encoding UTF8 }
+  if (-not $baseline) {
+    Set-Content -Path $baselinePath -Value '1' -Encoding UTF8
+    Write-AgentLog ("USB baseline saved. " + $items.Count + " devices already connected. A device plugged in after this is reported.")
+  } elseif ($reported -eq 0) {
+    Write-AgentLog 'No new USB devices.'
+  }
+}
+
+function Get-LocalIp {
+  $configs = @(Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue)
+  foreach ($config in $configs) {
+    foreach ($ip in @($config.IPAddress)) {
+      $text = [string]$ip
+      if ($text -match '^\d+\.\d+\.\d+\.\d+$' -and $text -notlike '127.*' -and $text -notlike '169.254.*') { return $text }
+    }
+  }
+  return ''
+}
+
+function Get-PublicPresence {
+  $cache = Join-Path $Root 'presence-cache.json'
+  if (Test-Path $cache) {
+    $age = (Get-Date) - (Get-Item $cache).LastWriteTime
+    if ($age.TotalMinutes -lt 10) {
+      try { return (Get-Content -Path $cache -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { }
+    }
+  }
+  foreach ($url in @('https://ipwho.is/', 'https://ipapi.co/json/')) {
+    try {
+      $remote = Invoke-RestMethod -Uri $url -TimeoutSec 12
+      $ip = [string]$remote.ip
+      if (-not $ip) { continue }
+      $code = [string]$remote.country_code
+      $country = [string]$remote.country
+      if ($remote.country_name) { $country = [string]$remote.country_name }
+      $obj = [pscustomobject]@{
+        ip = $ip
+        country_code = $code
+        country = $country
+        region = [string]$remote.region
+        city = [string]$remote.city
+      }
+      $obj | ConvertTo-Json -Compress | Set-Content -Path $cache -Encoding UTF8
+      return $obj
+    } catch {
+      Write-AgentLog ("Location lookup failed for ${url}: " + $_.Exception.Message)
+    }
+  }
+  return $null
+}
+
+function Send-Presence($Config) {
+  $local = Get-LocalIp
+  $geo = Get-PublicPresence
+  $result = Invoke-AgentRpc $Config 'agent_report_presence' @{
+    p_token = $Config.token
+    p_public_ip = $(if ($geo) { [string]$geo.ip } else { '' })
+    p_local_ip = $local
+    p_country_code = $(if ($geo) { [string]$geo.country_code } else { '' })
+    p_country_name = $(if ($geo) { [string]$geo.country } else { '' })
+    p_region_name = $(if ($geo) { [string]$geo.region } else { '' })
+    p_city = $(if ($geo) { [string]$geo.city } else { '' })
+  }
+  $where = (([string]$result.city), ([string]$result.country_code)) -join ', '
+  if ([bool]$result.alert) {
+    Write-AgentLog ("Outside UAE: " + $where.Trim(', ') + " " + [string]$result.public_ip)
+  } else {
+    Write-AgentLog ("Location " + $where.Trim(', ') + " " + [string]$result.public_ip)
+  }
 }
 
 function Get-Policy($Config) {
@@ -205,6 +301,7 @@ function Invoke-Enforce {
   Set-UsbPolicy $usb
   try { Send-SoftwareInventory $config } catch { Write-AgentLog ("Software report failed: " + $_.Exception.Message) }
   try { Send-UsbNotices $config $policy } catch { Write-AgentLog ("USB report failed: " + $_.Exception.Message) }
+  try { Send-Presence $config } catch { Write-AgentLog ("Location report failed: " + $_.Exception.Message) }
   $summary = if ([bool]$policy.hold) {
     'On hold. Admin rights are off and USB storage is blocked.'
   } elseif ($policy.admin -eq 'standing') {
@@ -235,8 +332,8 @@ if (-not $mutex.WaitOne(0, $false)) { exit 0 }
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Mulk Agent'
 $form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(520, 680)
-$form.MinimumSize = New-Object System.Drawing.Size(480, 600)
+$form.Size = New-Object System.Drawing.Size(520, 740)
+$form.MinimumSize = New-Object System.Drawing.Size(480, 660)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 $form.BackColor = [System.Drawing.Color]::FromArgb(244, 245, 247)
 
@@ -248,52 +345,52 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It shows the rules IT set, reports installed programs, and reports a removable drive. It does not read documents, keystrokes, or screenshots.'
-$intro.Size = New-Object System.Drawing.Size(460, 64)
+$intro.Text = 'This window is the company agent for this computer. It reports installed programs, USB devices, and the city and country of this computer''s public IP. It does not read documents, keystrokes, screenshots, or GPS.'
+$intro.Size = New-Object System.Drawing.Size(460, 72)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
 
 $status = New-Object System.Windows.Forms.Label
-$status.Size = New-Object System.Drawing.Size(460, 72)
-$status.Location = New-Object System.Drawing.Point(20, 124)
+$status.Size = New-Object System.Drawing.Size(460, 96)
+$status.Location = New-Object System.Drawing.Point(20, 132)
 $form.Controls.Add($status)
 
 $rules = New-Object System.Windows.Forms.ListBox
 $rules.Size = New-Object System.Drawing.Size(460, 130)
-$rules.Location = New-Object System.Drawing.Point(20, 204)
+$rules.Location = New-Object System.Drawing.Point(20, 236)
 $form.Controls.Add($rules)
 
 $nameLabel = New-Object System.Windows.Forms.Label
 $nameLabel.Text = 'Your name'
-$nameLabel.Location = New-Object System.Drawing.Point(20, 346)
+$nameLabel.Location = New-Object System.Drawing.Point(20, 378)
 $nameLabel.AutoSize = $true
 $form.Controls.Add($nameLabel)
 
 $nameBox = New-Object System.Windows.Forms.TextBox
-$nameBox.Location = New-Object System.Drawing.Point(20, 368)
+$nameBox.Location = New-Object System.Drawing.Point(20, 400)
 $nameBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($nameBox)
 
 $reasonLabel = New-Object System.Windows.Forms.Label
 $reasonLabel.Text = 'Why you need admin rights'
-$reasonLabel.Location = New-Object System.Drawing.Point(20, 404)
+$reasonLabel.Location = New-Object System.Drawing.Point(20, 436)
 $reasonLabel.AutoSize = $true
 $form.Controls.Add($reasonLabel)
 
 $reasonBox = New-Object System.Windows.Forms.TextBox
-$reasonBox.Location = New-Object System.Drawing.Point(20, 426)
+$reasonBox.Location = New-Object System.Drawing.Point(20, 458)
 $reasonBox.Size = New-Object System.Drawing.Size(460, 28)
 $form.Controls.Add($reasonBox)
 
 $ask = New-Object System.Windows.Forms.Button
 $ask.Text = 'Request admin rights'
-$ask.Location = New-Object System.Drawing.Point(20, 466)
+$ask.Location = New-Object System.Drawing.Point(20, 498)
 $ask.Size = New-Object System.Drawing.Size(180, 34)
 $form.Controls.Add($ask)
 
 $refresh = New-Object System.Windows.Forms.Button
 $refresh.Text = 'Refresh'
-$refresh.Location = New-Object System.Drawing.Point(210, 466)
+$refresh.Location = New-Object System.Drawing.Point(210, 498)
 $refresh.Size = New-Object System.Drawing.Size(100, 34)
 $form.Controls.Add($refresh)
 
@@ -301,7 +398,7 @@ $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Multiline = $true
 $logBox.ReadOnly = $true
 $logBox.ScrollBars = 'Vertical'
-$logBox.Location = New-Object System.Drawing.Point(20, 514)
+$logBox.Location = New-Object System.Drawing.Point(20, 546)
 $logBox.Size = New-Object System.Drawing.Size(460, 80)
 $form.Controls.Add($logBox)
 
@@ -323,10 +420,19 @@ function Update-Window {
       default { 'Standard user' }
     }
     $holdText = if ([bool]$policy.hold) { 'On hold. ' + [string]$policy.hold_reason } else { 'Not on hold' }
+    $network = 'Network location is sent to IT.'
+    $cache = Join-Path $Root 'presence-cache.json'
+    if (Test-Path $cache) {
+      try {
+        $geo = Get-Content -Path $cache -Raw -Encoding UTF8 | ConvertFrom-Json
+        $network = ('Network: ' + [string]$geo.city + ', ' + [string]$geo.country_code + ' · ' + [string]$geo.ip).Trim()
+      } catch { }
+    }
     $status.Text = @(
       ([string]$policy.tag + '  ' + [string]$policy.description),
       $adminText,
-      $holdText
+      $holdText,
+      $network
     ) -join [Environment]::NewLine
     $rules.Items.Clear()
     foreach ($rule in @($policy.rules)) { [void]$rules.Items.Add([string]$rule) }

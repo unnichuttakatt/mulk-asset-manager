@@ -1,7 +1,7 @@
 // Control for every company asset in the register.
 // Computers, printers, and phones store a decision here. A visible enrollment
-// on the device is what applies it. This page does not record keystrokes,
-// screenshots, or location.
+// on the device is what applies it. It records the public IP and the city
+// and country of that IP. It does not record GPS, keystrokes, or screenshots.
 
 import { store, loadAssets, ctx } from '../data.js';
 import { esc, fmtDateTime, modal, toast } from '../ui.js';
@@ -368,7 +368,14 @@ async function loadAgents() {
   ui.agentReady = true;
   if (ui.source !== 'db') { ui.agentReady = false; return; }
   try {
-    ui.agents = await store.db.selectAll('agent_devices', { select: 'asset_id,hostname,windows_user,last_seen,created_at', order: 'last_seen.desc' });
+    const wide = 'asset_id,hostname,windows_user,last_seen,created_at,public_ip,local_ip,country_code,country_name,city,outside_uae,location_at';
+    try {
+      ui.agents = await store.db.selectAll('agent_devices', { select: wide, order: 'last_seen.desc' });
+    } catch (err) {
+      if (missingTable(err) || /column/i.test(String(err?.message || ''))) {
+        ui.agents = await store.db.selectAll('agent_devices', { select: 'asset_id,hostname,windows_user,last_seen,created_at', order: 'last_seen.desc' });
+      } else throw err;
+    }
   } catch (err) {
     if (!missingTable(err)) throw err;
     ui.agentReady = false;
@@ -537,7 +544,7 @@ function paint(main) {
       A printer is connected when you add its queue on the company print server.
       A phone stays on the company management profile if you use one later.
       Monitors and other items stay under this register: who has them, where they are, and whether they are on hold.
-      This page does not record keystrokes, screenshots, or location.
+      This page records the public IP and the city and country of that IP, and alerts when the country is outside the UAE or a USB device is plugged in. It does not record GPS, keystrokes, or screenshots.
     </div>
     ${ui.source === 'local' ? `
       <div class="err" style="margin-bottom:16px">
@@ -659,6 +666,22 @@ function paint(main) {
   }
 }
 
+function networkNote(asset) {
+  const agent = agentFor(asset.id);
+  if (!agent || (!agent.public_ip && !agent.city && !agent.country_code)) {
+    return '<p class="muted" style="margin:0">No public IP yet. Mulk Agent sends it on its regular check, about every five minutes after the script is updated.</p>';
+  }
+  const place = [agent.city, agent.country_name || agent.country_code].filter(Boolean).join(', ');
+  const away = !agent.country_code
+    ? '<span class="badge st-under_repair">Country unknown</span>'
+    : agent.outside_uae
+      ? '<span class="badge st-broken">Outside UAE</span>'
+      : '<span class="badge st-available">Inside UAE</span>';
+  return `<p style="margin:0 0 8px">${away} ${esc(place || '')}</p>
+    <p class="muted" style="margin:0">Public IP <span class="mono">${esc(agent.public_ip || '')}</span>${agent.local_ip ? ` · local <span class="mono">${esc(agent.local_ip)}</span>` : ''}${agent.location_at ? ` · ${esc(fmtDateTime(agent.location_at))}` : ''}</p>
+    <a class="btn sm" href="#/alerts" style="margin-top:10px">Open alerts</a>`;
+}
+
 function softwareNote(asset) {
   if (!ui.softwareReady) {
     return '<p class="muted" style="margin:0">Run <span class="mono">supabase/asset-admin.sql</span> once so this computer can report its installed programs.</p>';
@@ -739,6 +762,10 @@ function detail(a) {
       <div>
         <h2 style="margin-bottom:8px">Installed software</h2>
         ${softwareNote(a)}
+      </div>
+      <div>
+        <h2 style="margin-bottom:8px">Network location</h2>
+        ${networkNote(a)}
       </div>
       <div>
         <h2 style="margin-bottom:8px">Admin rights</h2>

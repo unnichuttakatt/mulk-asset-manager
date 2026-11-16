@@ -22,12 +22,14 @@ export async function dashboardView(main) {
   ]);
   let software = [];
   let copies = [];
+  let away = [];
   try {
-    [software, copies] = await Promise.all([
+    [software, copies, away] = await Promise.all([
       store.db.select('software_events', { select: 'id,asset_id,name,kind,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }),
       store.db.select('copy_activity', { select: 'id,asset_id,channel,file_name,action,happened_at', acknowledged_at: 'is.null', order: 'happened_at.desc', limit: '6' }),
+      store.db.select('agent_devices', { select: 'asset_id,public_ip,city,country_name,country_code,location_at', outside_uae: 'eq.true', order: 'location_at.desc', limit: '8' }),
     ]);
-  } catch { software = []; copies = []; }
+  } catch { software = []; copies = []; away = []; }
   const by = Object.fromEntries(countBy(assets, 'status'));
   const kpi = (status, label) => `
     <a class="card kpi" href="${status ? q({ status }) : '#/assets'}">
@@ -67,6 +69,19 @@ export async function dashboardView(main) {
           ${warranty.length ? `<h2 style="margin:18px 0 10px">Warranty ending in 60 days</h2><div class="bars">${warranty.slice(0, 6).map(a => `
             <a class="bar" style="grid-template-columns:1fr auto" href="#/asset/${a.id}"><span class="bar-name"><span class="tag">${esc(a.tag)}</span> <span class="muted">${esc(a.description || '')}</span></span><span class="muted">${fmtDate(a.warranty_expiry)}</span></a>`).join('')}</div>` : ''}
         </div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-h"><h2>Outside the UAE</h2><a href="#/alerts">${away.length ? away.length + ' now' : 'Alerts'}</a></div>
+      ${away.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>
+        ${away.map(r => {
+          const asset = assets.find(a => a.id === r.asset_id);
+          const place = [r.city, r.country_name || r.country_code].filter(Boolean).join(', ');
+          return `<tr class="clickable" data-href="#/alerts">
+            <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(place)}</div></td>
+            <td class="mono">${esc(r.public_ip || '')}</td>
+            <td class="sub">${fmtDateTime(r.location_at)}</td></tr>`;
+        }).join('')}
+      </tbody></table></div>` : '<div class="empty">Every enrolled computer last seen in the UAE, or none have reported a public IP yet. This is the city and country of the public IP, not GPS.</div>'}
     </div>
     <div class="grid-2" style="margin-bottom:16px">
       <div class="card">

@@ -262,7 +262,7 @@ begin
   if p_channel not in ('usb','clipboard','cloud','mail','print') then
     raise exception 'Unknown channel';
   end if;
-  if p_action not in ('blocked','warned','quarantined') then
+  if p_action not in ('blocked','warned','quarantined','plugged') then
     raise exception 'Unknown result';
   end if;
   if p_file_name is null or char_length(trim(p_file_name)) < 1 or char_length(trim(p_file_name)) > 180 then

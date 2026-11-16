@@ -58,6 +58,15 @@ export async function assetView(main, params, id) {
     store.db.select('asset_events', { asset_id: 'eq.' + id, select: '*', order: 'created_at.desc' }),
   ]);
   let programs = [];
+  let devices = [];
+  try {
+    devices = await store.db.select('agent_devices', {
+      asset_id: 'eq.' + id,
+      select: 'hostname,public_ip,local_ip,country_code,country_name,city,outside_uae,location_at,last_seen',
+      order: 'last_seen.desc',
+      limit: '3',
+    }) || [];
+  } catch { devices = []; }
   try {
     programs = await store.db.select('installed_software', {
       asset_id: 'eq.' + id,
@@ -124,6 +133,18 @@ export async function assetView(main, params, id) {
         <div class="muted" style="font-size:12.5px">Scan with a phone camera to open this page.</div>
         <button class="btn" id="label">${icon('print')} Print label</button>
       </div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-h"><h2>Network location</h2><a href="#/alerts">Alerts</a></div>
+      ${devices.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Computer</th><th>Place</th><th>Public IP</th><th>Local IP</th><th>Checked</th></tr></thead><tbody>
+        ${devices.map(d => `<tr>
+          <td>${esc(d.hostname || '')}</td>
+          <td>${d.country_code ? `<span class="badge ${d.outside_uae ? 'st-broken' : 'st-available'}">${d.outside_uae ? 'Outside UAE' : 'Inside UAE'}</span> ` : ''}${esc([d.city, d.country_name || d.country_code].filter(Boolean).join(', '))}</td>
+          <td class="mono">${esc(d.public_ip || '')}</td>
+          <td class="mono">${esc(d.local_ip || '')}</td>
+          <td class="sub">${fmtDateTime(d.location_at || d.last_seen)}</td>
+        </tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">No agent on this asset yet. On a laptop or desktop, Mulk Agent records the public IP and the city and country of that IP.</div>'}
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-h"><h2>Installed software</h2><a href="#/alerts?asset=${esc(a.id)}">${programs.length ? programs.length + ' installed' : 'Alerts'}</a></div>
