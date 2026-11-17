@@ -5,26 +5,15 @@
 #include <wtsapi32.h>
 #include <stdio.h>
 
-#define IDC_CODE 101
 #define IDC_USER 102
 #define IDC_GO 103
 #define IDC_STATUS 104
 
 static HWND g_status;
-static wchar_t g_code[16];
 static wchar_t g_user[160];
 
 static void SetStatus(const wchar_t *text) {
   if (g_status) SetWindowTextW(g_status, text);
-}
-
-static int AllowedCode(const wchar_t *text) {
-  int n = 0;
-  for (; text[n]; n++) {
-    wchar_t c = text[n];
-    if (!((c >= L'A' && c <= L'Z') || (c >= L'2' && c <= L'9'))) return 0;
-  }
-  return n == 8;
 }
 
 static int SafeUser(const wchar_t *text) {
@@ -47,32 +36,6 @@ static void Trim(wchar_t *text) {
     end--;
     *end = 0;
   }
-}
-
-static void ReadCodeFile(wchar_t *buf, int cch) {
-  wchar_t path[MAX_PATH];
-  wchar_t *slash;
-  HANDLE file;
-  char raw[64];
-  DWORD got = 0;
-  int i;
-  buf[0] = 0;
-  if (!GetModuleFileNameW(NULL, path, MAX_PATH)) return;
-  slash = wcsrchr(path, L'\\');
-  if (!slash) return;
-  wcscpy(slash + 1, L"code.txt");
-  file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (file == INVALID_HANDLE_VALUE) return;
-  if (!ReadFile(file, raw, sizeof(raw) - 1, &got, NULL)) got = 0;
-  CloseHandle(file);
-  raw[got] = 0;
-  for (i = 0; raw[i] && i < cch - 1; i++) {
-    if (raw[i] == '\r' || raw[i] == '\n') break;
-    buf[i] = (wchar_t)(unsigned char)raw[i];
-  }
-  buf[i] = 0;
-  Trim(buf);
-  if (!AllowedCode(buf)) buf[0] = 0;
 }
 
 static void ConsoleUser(wchar_t *buf, int cch) {
@@ -114,7 +77,7 @@ static DWORD WINAPI InstallThread(LPVOID unused) {
   }
   GetSystemDirectoryW(powershell, MAX_PATH);
   wcscat(powershell, L"\\WindowsPowerShell\\v1.0\\powershell.exe");
-  _snwprintf(command, 1200, L"\"%s\" -NoProfile -ExecutionPolicy Bypass -File \"%s\" -Code \"%s\" -WindowsUser \"%s\"", powershell, script, g_code, g_user);
+  _snwprintf(command, 1200, L"\"%s\" -NoProfile -ExecutionPolicy Bypass -File \"%s\" -WindowsUser \"%s\"", powershell, script, g_user);
   command[1199] = 0;
   ZeroMemory(&si, sizeof(si));
   si.cb = sizeof(si);
@@ -133,11 +96,11 @@ static DWORD WINAPI InstallThread(LPVOID unused) {
   DeleteFileW(script);
   if (code == 0) {
     SetStatus(L"Mulk Agent is installed.");
-    MessageBoxW(NULL, L"Mulk Agent is installed. Leave its window available.", L"Mulk Agent setup", MB_ICONINFORMATION);
+    MessageBoxW(NULL, L"Mulk Agent is installed. It shows in Control as pending until IT assigns it to an asset.", L"Mulk Agent setup", MB_ICONINFORMATION);
     PostQuitMessage(0);
   } else {
     SetStatus(L"Setup did not finish.");
-    MessageBoxW(NULL, L"Setup did not finish. Check the code and the Windows account, then try again.", L"Mulk Agent setup", MB_ICONERROR);
+    MessageBoxW(NULL, L"Setup did not finish. Check the Windows account, then try again.", L"Mulk Agent setup", MB_ICONERROR);
   }
   EnableWindow(GetDlgItem(GetParent(g_status), IDC_GO), TRUE);
   return 0;
@@ -147,15 +110,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpara
   switch (msg) {
   case WM_COMMAND:
     if (LOWORD(wparam) == IDC_GO) {
-      GetWindowTextW(GetDlgItem(hwnd, IDC_CODE), g_code, 16);
       GetWindowTextW(GetDlgItem(hwnd, IDC_USER), g_user, 160);
-      Trim(g_code);
       Trim(g_user);
-      CharUpperW(g_code);
-      if (!AllowedCode(g_code)) {
-        MessageBoxW(hwnd, L"Enter the 8 character code from Control.", L"Mulk Agent setup", MB_ICONWARNING);
-        return 0;
-      }
       if (!SafeUser(g_user)) {
         MessageBoxW(hwnd, L"Enter the Windows account of the person who uses this computer.", L"Mulk Agent setup", MB_ICONWARNING);
         return 0;
@@ -173,9 +129,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpara
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, LPWSTR cmdline, int show) {
   WNDCLASSW wc;
-  HWND hwnd, code, user;
+  HWND hwnd, user;
   MSG msg;
-  wchar_t saved[16];
   wchar_t account[160];
   (void)prev;
   (void)cmdline;
@@ -189,19 +144,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, LPWSTR cmdline, int show
   wc.lpszClassName = L"MulkAgentSetup";
   RegisterClassW(&wc);
   hwnd = CreateWindowExW(0, L"MulkAgentSetup", L"Mulk Agent setup",
-    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 460, 250,
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 480, 250,
     NULL, NULL, instance, NULL);
-  CreateWindowExW(0, L"STATIC", L"Code from Control", WS_CHILD | WS_VISIBLE, 24, 20, 400, 20, hwnd, NULL, instance, NULL);
-  code = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_UPPERCASE, 24, 42, 400, 26, hwnd, (HMENU)IDC_CODE, instance, NULL);
-  CreateWindowExW(0, L"STATIC", L"Windows account for this computer", WS_CHILD | WS_VISIBLE, 24, 80, 400, 20, hwnd, NULL, instance, NULL);
-  user = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 24, 102, 400, 26, hwnd, (HMENU)IDC_USER, instance, NULL);
-  CreateWindowExW(0, L"BUTTON", L"Install", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 24, 146, 120, 32, hwnd, (HMENU)IDC_GO, instance, NULL);
-  g_status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 156, 152, 270, 24, hwnd, (HMENU)IDC_STATUS, instance, NULL);
-  ReadCodeFile(saved, 16);
-  if (saved[0]) SetWindowTextW(code, saved);
+  CreateWindowExW(0, L"STATIC", L"No code is needed. This computer appears in Control as pending, and IT assigns it to an asset.",
+    WS_CHILD | WS_VISIBLE, 24, 16, 420, 40, hwnd, NULL, instance, NULL);
+  CreateWindowExW(0, L"STATIC", L"Windows account for this computer", WS_CHILD | WS_VISIBLE, 24, 64, 420, 20, hwnd, NULL, instance, NULL);
+  user = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 24, 88, 420, 26, hwnd, (HMENU)IDC_USER, instance, NULL);
+  CreateWindowExW(0, L"BUTTON", L"Install", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 24, 132, 120, 32, hwnd, (HMENU)IDC_GO, instance, NULL);
+  g_status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 156, 138, 290, 40, hwnd, (HMENU)IDC_STATUS, instance, NULL);
   ConsoleUser(account, 160);
   if (account[0]) SetWindowTextW(user, account);
-  SendMessageW(code, EM_LIMITTEXT, 8, 0);
   ShowWindow(hwnd, SW_SHOW);
   UpdateWindow(hwnd);
   while (GetMessageW(&msg, NULL, 0, 0)) {

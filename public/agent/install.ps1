@@ -5,6 +5,7 @@ param(
   [string]$WindowsUser,
   [string]$Origin = 'https://mulk-asset-manager.vercel.app'
 )
+# $Code is ignored. A new computer waits in Control until an admin assigns it to an asset.
 
 $ErrorActionPreference = 'Stop'
 $Root = 'C:\ProgramData\MulkAgent'
@@ -21,7 +22,6 @@ if (-not (Test-IsAdmin)) {
   exit 1
 }
 
-if (-not $Code) { $Code = Read-Host 'Enter the 8 character code from Control' }
 if (-not $WindowsUser) {
   $current = whoami
   $WindowsUser = Read-Host "Windows account to manage [$current]"
@@ -43,13 +43,24 @@ $headers = @{
   Authorization = 'Bearer ' + $public.supabaseAnonKey
   'Content-Type' = 'application/json'
 }
-$body = @{ p_code = $Code.Trim().ToUpper(); p_hostname = $env:COMPUTERNAME; p_windows_user = $WindowsUser.Trim() } | ConvertTo-Json -Compress
+$accounts = @()
 try {
-  $enroll = Invoke-WebRequest -Uri ($public.supabaseUrl.TrimEnd('/') + '/rest/v1/rpc/agent_enroll') -Method Post -Headers $headers -Body $body -UseBasicParsing
+  $skip = @('Guest', 'DefaultAccount', 'WDAGUtilityAccount')
+  $signedIn = ($WindowsUser.Trim() -split '\\')[-1]
+  $accounts = @(Get-CimInstance -ClassName Win32_UserAccount -Filter "LocalAccount=True AND Disabled=False" |
+    ForEach-Object { [string]$_.Name } |
+    Where-Object { $_ -and ($_ -notin $skip) -and ($_ -ne $signedIn) } |
+    Select-Object -First 12)
+} catch { $accounts = @() }
+$accountText = ($accounts -join ', ')
+if ($accountText.Length -gt 400) { $accountText = $accountText.Substring(0, 400) }
+$body = @{ p_hostname = $env:COMPUTERNAME; p_windows_user = $WindowsUser.Trim(); p_accounts = $accountText } | ConvertTo-Json -Compress
+try {
+  $enroll = Invoke-WebRequest -Uri ($public.supabaseUrl.TrimEnd('/') + '/rest/v1/rpc/agent_register') -Method Post -Headers $headers -Body $body -UseBasicParsing
 } catch {
   $detail = $_.Exception.Message
   if ($_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message }
-  throw "Enrollment failed. $detail"
+  throw "Could not register this computer. $detail"
 }
 $result = $enroll.Content | ConvertFrom-Json
 
@@ -101,7 +112,7 @@ schtasks.exe /Create /TN 'Mulk Agent Watch' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGH
 $sample = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Sample'
 schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 5 /RU $WindowsUser /IT /RL LIMITED /TR $sample /F | Out-Null
 
-Write-Host "Mulk Agent installed for $($result.tag)."
-Write-Host 'The Mulk Agent window opens at sign-in. IT approves admin requests in Control.'
+Write-Host "Mulk Agent installed on $($result.hostname) for $($result.windows_user)."
+Write-Host 'It stays pending until an admin assigns it to an asset in Control.'
 Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$agentFile
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $agentFile -Enforce

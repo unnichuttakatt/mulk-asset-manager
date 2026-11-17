@@ -131,6 +131,8 @@ const ui = {
   activity: [],
   agents: [],
   agentReady: true,
+  pendingSystems: [],
+  pendingReady: true,
   softwareOpen: [],
   softwareReady: true,
   health: [],
@@ -410,6 +412,21 @@ function agentFor(assetId) {
   return (ui.agents || []).find(a => a.asset_id === assetId) || null;
 }
 
+async function loadPending() {
+  ui.pendingSystems = [];
+  ui.pendingReady = ui.source === 'db';
+  if (ui.source !== 'db') { ui.pendingReady = false; return; }
+  try {
+    ui.pendingSystems = await store.db.selectAll('agent_pending', {
+      select: 'id,hostname,windows_user,account_names,seen_at,created_at',
+      order: 'created_at.desc',
+    }) || [];
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+    ui.pendingReady = false;
+  }
+}
+
 async function loadSoftwareAlerts() {
   ui.softwareOpen = [];
   ui.softwareReady = true;
@@ -548,19 +565,23 @@ function watchRequests(main) {
   clearInterval(pollTimer);
   const gen = ++pollGen;
   const seenSoftware = new Set(ui.softwareOpen.map(r => String(r.id)));
-  let opsStamp = JSON.stringify([ui.jobs, ui.resets, ui.health, ui.support]);
+  const seenPending = new Set((ui.pendingSystems || []).map(r => String(r.id)));
+  let opsStamp = JSON.stringify([ui.jobs, ui.resets, ui.health, ui.support, ui.pendingSystems]);
   pollTimer = setInterval(async () => {
     if (gen !== pollGen || !main.querySelector('#control-live') || document.querySelector('.modal-bg')) return;
     const seen = new Set(pending().map(r => String(r.id)));
     const seenHelp = new Set(helpWaiting().map(r => String(r.id)));
-    try { await loadQueues(); await loadAgents(); await loadSoftwareAlerts(); await loadOps(); } catch { return; }
+    try { await loadQueues(); await loadAgents(); await loadPending(); await loadSoftwareAlerts(); await loadOps(); } catch { return; }
     const newSoftware = ui.softwareOpen.filter(r => !seenSoftware.has(String(r.id)));
     newSoftware.forEach(r => seenSoftware.add(String(r.id)));
     const newRequest = pending().some(r => !seen.has(String(r.id)));
     const newHelp = helpWaiting().some(r => !seenHelp.has(String(r.id)));
-    const nextOps = JSON.stringify([ui.jobs, ui.resets, ui.health, ui.support]);
+    const nextOps = JSON.stringify([ui.jobs, ui.resets, ui.health, ui.support, ui.pendingSystems]);
     const opsChanged = nextOps !== opsStamp;
     opsStamp = nextOps;
+    const newPending = (ui.pendingSystems || []).filter(r => !seenPending.has(String(r.id)));
+    newPending.forEach(r => seenPending.add(String(r.id)));
+    if (newPending.length) toast(newPending.length === 1 ? `${newPending[0].hostname || 'A computer'} is waiting to be assigned` : `${newPending.length} computers are waiting to be assigned`);
     if (newSoftware.length) toast(newSoftware.length === 1 ? `New program: ${newSoftware[0].name}` : `${newSoftware.length} program changes reported`);
     if (newHelp) toast(helpWaiting().length === 1 ? 'Someone asked for remote help' : `${helpWaiting().length} people asked for remote help`);
     if (newRequest || newHelp || newSoftware.length || opsChanged) {
@@ -576,7 +597,7 @@ export async function controlView(main) {
   try {
     const assets = await loadAssets();
     ui.assets = assets.filter(a => a.status !== 'disposed').sort((a, b) => (a.tag || '').localeCompare(b.tag || ''));
-    await Promise.all([loadControls(), loadQueues(), loadAgents(), loadSoftwareAlerts(), loadOps()]);
+    await Promise.all([loadControls(), loadQueues(), loadAgents(), loadPending(), loadSoftwareAlerts(), loadOps()]);
     if (pending().length) ui.showPopup = true;
     if (helpWaiting().length) ui.showHelp = true;
   } catch (err) {
@@ -619,7 +640,7 @@ function paint(main) {
     </div>
     <div class="note" style="margin-bottom:16px">
       <strong>How a computer gets connected.</strong>
-      Install <a href="/agent/">Mulk Agent</a> on the Windows laptop or desktop. It is a separate program, and Intune is not required. The person sees a window named Mulk Agent. After this version is installed once, the computer replaces its own copy when a newer one is published. That check is about every 30 minutes.
+      Install <a href="/agent/">Mulk Agent</a> on the Windows laptop or desktop. It is a separate program, and Intune is not required. The person sees a window named Mulk Agent. The computer then appears below as pending, with its system name and Windows accounts, until you assign it to an asset. After this version is installed once, the computer replaces its own copy when a newer one is published. That check is about every 30 minutes.
       A printer is connected when you add its queue on the company print server.
       A phone stays on the company management profile if you use one later.
       Monitors and other items stay under this register: who has them, where they are, and whether they are on hold.
@@ -647,6 +668,7 @@ function paint(main) {
       <div class="card kpi"><div class="k-label">Not enrolled</div><div class="k-val">${counts.waiting}</div></div>
       <div class="card kpi"><div class="k-label">On hold</div><div class="k-val">${counts.hold}</div></div>
     </div>
+    ${pendingCard()}
     <div class="card" style="margin-bottom:16px">
       <div class="filters">
         <input id="cq" class="search" placeholder="Search tag, person, serial, site" value="${esc(ui.q)}" />
@@ -725,6 +747,12 @@ function paint(main) {
       toast('Could not copy. Open supabase/laptop-control.sql in the project.', true);
     }
   }));
+  main.querySelectorAll('[data-assign]').forEach(btn => {
+    btn.onclick = () => assignPending(main, btn.dataset.assign);
+  });
+  main.querySelectorAll('[data-dismiss]').forEach(btn => {
+    btn.onclick = () => dismissPending(main, btn.dataset.dismiss);
+  });
   document.getElementById('bulk-install').onclick = () => askBulkInstall(main);
   document.getElementById('all-local-password').onclick = () => askAllLocalPasswords(main);
   document.getElementById('open-help').onclick = () => { ui.showHelp = true; paint(main); };
@@ -839,13 +867,46 @@ function softwareNote(asset) {
     <a class="btn sm" href="#/alerts?asset=${esc(asset.id)}">Review software</a>`;
 }
 
+function pendingCard() {
+  if (!ui.pendingReady) {
+    return `<div class="err" style="margin-bottom:16px"><strong>Pending computers are not stored yet.</strong> Run <span class="mono">supabase/agent-pending.sql</span> once in the Supabase SQL editor. Until then, a new install cannot wait for an asset.</div>`;
+  }
+  const computers = ui.assets.filter(a => kindOf(a) === 'laptop' || kindOf(a) === 'desktop');
+  const options = computers.map(a => `<option value="${esc(a.id)}">${esc(a.tag)}${a.assigned_to ? ' · ' + esc(a.assigned_to) : ''}${a.description ? ' · ' + esc(a.description) : ''}</option>`).join('');
+  const rows = ui.pendingSystems || [];
+  const body = rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+      <th>System name</th><th>Windows account</th><th>Other accounts</th><th>Seen</th><th>Assign to an asset</th>
+    </tr></thead><tbody>
+      ${rows.map(row => `<tr>
+        <td class="mono">${esc(row.hostname || '—')}</td>
+        <td>${esc(row.windows_user || '—')}</td>
+        <td>${esc(row.account_names || '—')}</td>
+        <td>${esc(fmtDateTime(row.seen_at || row.created_at) || '')}</td>
+        <td>
+          <div class="row">
+            <select data-pending-asset="${esc(row.id)}" ${computers.length ? '' : 'disabled'}>
+              <option value="">Choose an asset</option>
+              ${options}
+            </select>
+            <button type="button" class="btn sm primary" data-assign="${esc(row.id)}">Assign</button>
+            <button type="button" class="btn sm" data-dismiss="${esc(row.id)}">Dismiss</button>
+          </div>
+        </td>
+      </tr>`).join('')}
+    </tbody></table></div>` : '<div class="empty">No computer is waiting. Install Mulk Agent and it appears here with its system name and Windows accounts.</div>';
+  return `<div class="card" style="margin-bottom:16px">
+    <div class="card-h"><h2>Installed systems waiting for an asset</h2><span class="muted">${rows.length} waiting</span></div>
+    ${body}
+  </div>`;
+}
+
 function steps(kind) {
   if (kind === 'laptop' || kind === 'desktop') {
     return [
       'Match the serial number on the computer to this asset tag.',
       'The person signs in with their company account.',
-      'In Control, create a Mulk Agent code for this computer. On the computer, run the install command from the Mulk Agent page as Administrator and enter that code. The Mulk Agent window stays visible.',
-      'When the code is accepted, this computer shows as enrolled and Mulk Agent starts applying the rules. Until then, buttons here only save the decision.',
+      'On the computer, download Mulk Agent and run MulkAgentSetup.exe as Administrator. No code is required. The Mulk Agent window stays visible.',
+      'The computer appears at the top of Control as pending, with its system name and Windows accounts. Choose the asset and assign it. Until then, Mulk Agent waits and does not report.',
     ];
   }
   if (kind === 'printer') {
@@ -898,10 +959,9 @@ function detail(a) {
         <h2 style="margin-bottom:8px">Mulk Agent</h2>
         <p class="muted" style="margin:0 0 10px">${agentFor(a.id)
           ? `Installed on ${esc(agentFor(a.id).hostname || 'this computer')} for ${esc(agentFor(a.id).windows_user || 'its Windows account')}. Last seen ${esc(fmtDateTime(agentFor(a.id).last_seen) || 'not yet')}.${agentFor(a.id).last_seen && (Date.now() - new Date(agentFor(a.id).last_seen).getTime() > 24 * 3600 * 1000) ? ' Not seen for more than a day.' : ''}`
-          : 'Not installed yet. Download a setup file for this computer, or create a code and run the installer as Administrator.'}</p>
+          : 'Not installed yet. Run Mulk Agent setup on the computer. It appears in the pending list, and you assign it to this asset.'}</p>
         <div class="row">
-          <button type="button" class="btn sm primary" data-act="download-setup">Download setup for this computer</button>
-          <button type="button" class="btn sm" data-act="agent-code">Create Mulk Agent code</button>
+          <a class="btn sm primary" href="/agent/MulkAgentSetup.exe" download="MulkAgentSetup.exe">Download Mulk Agent</a>
           <a class="btn sm" href="/agent/" target="_blank" rel="noopener">Install steps</a>
         </div>
       </div>
@@ -1049,10 +1109,6 @@ async function act(main, asset, kind) {
       await save(main, asset, { ...current(asset), hold: true, hold_reason: reason }, 'hold', `Placed on hold: ${reason}`);
     } else if (kind === 'release') {
       await save(main, asset, { ...c, hold: false, hold_reason: null }, 'hold', 'Hold released');
-    } else if (kind === 'agent-code') {
-      await askForAgentCode(asset);
-    } else if (kind === 'download-setup') {
-      await downloadSetup(asset);
     } else if (kind === 'local-password') {
       await askLocalPassword(main, asset);
     } else if (kind === 'support') {
@@ -1160,93 +1216,53 @@ async function denyRequest(main, id) {
   } catch (err) { toast(err.message || String(err), true); }
 }
 
-function downloadBlob(name, bytes, type) {
-  const blob = new Blob([bytes], { type });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-    table[n] = c >>> 0;
+async function assignPending(main, id) {
+  const select = main.querySelector(`[data-pending-asset="${CSS.escape(id)}"]`);
+  const assetId = select && select.value;
+  if (!assetId) {
+    toast('Choose the asset this computer belongs to.', true);
+    return;
   }
-  return table;
-})();
-
-function crc32(data) {
-  let c = 0xffffffff;
-  for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-function zipStore(files) {
-  const enc = new TextEncoder();
-  const parts = [];
-  const central = [];
-  let offset = 0;
-  for (const file of files) {
-    const name = enc.encode(file.name);
-    const crc = crc32(file.data);
-    const local = new Uint8Array(30 + name.length);
-    const view = new DataView(local.buffer);
-    view.setUint32(0, 0x04034b50, true);
-    view.setUint16(4, 20, true);
-    view.setUint16(8, 0, true);
-    view.setUint32(14, crc, true);
-    view.setUint32(18, file.data.length, true);
-    view.setUint32(22, file.data.length, true);
-    view.setUint16(26, name.length, true);
-    local.set(name, 30);
-    parts.push(local, file.data);
-    const cen = new Uint8Array(46 + name.length);
-    const cenView = new DataView(cen.buffer);
-    cenView.setUint32(0, 0x02014b50, true);
-    cenView.setUint16(4, 20, true);
-    cenView.setUint16(6, 20, true);
-    cenView.setUint32(16, crc, true);
-    cenView.setUint32(20, file.data.length, true);
-    cenView.setUint32(24, file.data.length, true);
-    cenView.setUint16(28, name.length, true);
-    cenView.setUint32(42, offset, true);
-    cen.set(name, 46);
-    central.push(cen);
-    offset += local.length + file.data.length;
+  const asset = ui.assets.find(a => a.id === assetId);
+  const row = (ui.pendingSystems || []).find(item => item.id === id);
+  const existing = agentFor(assetId);
+  if (existing) {
+    const ok = await modal({
+      title: 'This asset already has a computer',
+      submit: 'Replace it',
+      danger: true,
+      body: `<p style="margin:0"><b class="mono">${esc(asset?.tag || '')}</b> is already linked to ${esc(existing.hostname || 'another computer')}. Assigning ${esc(row?.hostname || 'this computer')} replaces that link.</p>`,
+    });
+    if (!ok) return;
   }
-  const centralSize = central.reduce((n, part) => n + part.length, 0);
-  const end = new Uint8Array(22);
-  const endView = new DataView(end.buffer);
-  endView.setUint32(0, 0x06054b50, true);
-  endView.setUint16(8, files.length, true);
-  endView.setUint16(10, files.length, true);
-  endView.setUint32(12, centralSize, true);
-  endView.setUint32(16, offset, true);
-  const chunks = [...parts, ...central, end];
-  const out = new Uint8Array(chunks.reduce((n, part) => n + part.length, 0));
-  let at = 0;
-  for (const chunk of chunks) { out.set(chunk, at); at += chunk.length; }
-  return out;
+  try {
+    await store.db.rpc('admin_assign_pending', { p_id: id, p_asset_id: assetId });
+    toast(`${row?.hostname || 'Computer'} assigned to ${asset?.tag || 'the asset'}`);
+    ui.selected = assetId;
+    await Promise.all([loadPending(), loadAgents(), loadControls()]);
+    paint(main);
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
 }
 
-async function downloadSetup(asset) {
-  const code = await store.db.rpc('agent_create_code', { p_asset_id: asset.id });
-  const text = String(code || '').replace(/^"|"$/g, '');
-  const safeTag = String(asset.tag || 'computer').replace(/[^\w.-]+/g, '_');
-  const response = await fetch('/agent/MulkAgentSetup.exe');
-  if (!response.ok) throw new Error('The setup program could not be downloaded.');
-  const exe = new Uint8Array(await response.arrayBuffer());
-  if (exe.length < 64 || exe[0] !== 0x4d || exe[1] !== 0x5a) throw new Error('The setup program is not a Windows executable.');
-  const zip = zipStore([
-    { name: 'MulkAgentSetup.exe', data: exe },
-    { name: 'code.txt', data: new TextEncoder().encode(text + '\r\n') },
-  ]);
-  downloadBlob(`MulkAgent-${safeTag}.zip`, zip, 'application/zip');
-  toast('Setup downloaded. Unzip it and run MulkAgentSetup.exe. The code is already filled in.');
+async function dismissPending(main, id) {
+  const row = (ui.pendingSystems || []).find(item => item.id === id);
+  const ok = await modal({
+    title: 'Dismiss this computer',
+    submit: 'Dismiss',
+    danger: true,
+    body: `<p style="margin:0">Remove <b class="mono">${esc(row?.hostname || 'this computer')}</b> from the waiting list. It does not report until Mulk Agent is installed again.</p>`,
+  });
+  if (!ok) return;
+  try {
+    await store.db.rpc('admin_dismiss_pending', { p_id: id });
+    toast('Removed from the waiting list');
+    await loadPending();
+    paint(main);
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
 }
 
 async function askAllLocalPasswords(main) {
@@ -1448,21 +1464,6 @@ async function askSupport(main, asset) {
   } catch (err) {
     toast(err.message || String(err), true);
   }
-}
-
-async function askForAgentCode(asset) {
-  const code = await store.db.rpc('agent_create_code', { p_asset_id: asset.id });
-  const text = String(code || '').replace(/^"|"$/g, '');
-  await modal({
-    title: 'Mulk Agent code',
-    submit: 'Copy code',
-    cancel: 'Close',
-    body: `<p style="margin:0">Download <a href="/agent/MulkAgentSetup.exe">Mulk Agent setup</a>, run MulkAgentSetup.exe, and type this code. It works once and expires in 24 hours.</p>
-      <p class="mono" style="font-size:28px;letter-spacing:.18em;margin:12px 0">${esc(text)}</p>
-      <p class="muted" style="margin:8px 0 0">The installer page is <a href="/agent/" target="_blank" rel="noopener">/agent/</a>. If creating a code fails, run supabase/agent.sql in the Supabase SQL editor. Run supabase/laptop-control.sql first if you have not.</p>`,
-    async onSubmit() { await navigator.clipboard.writeText(text); },
-  });
-  toast('Install code created');
 }
 
 async function askForAdmin(main, asset) {

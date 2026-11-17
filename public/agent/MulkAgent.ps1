@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:AgentBuild = '20261117a'
+$script:AgentBuild = '20261117b'
 $script:UpdateHost = 'https://mulk-asset-manager.vercel.app'
 $Root = 'C:\ProgramData\MulkAgent'
 $AgentFile = Join-Path $Root 'MulkAgent.ps1'
@@ -1359,6 +1359,7 @@ function Invoke-Watch {
     return
   }
   try { Sync-AssetLock $null } catch { Write-AgentLog 'Could not clear an old sign-in lock.' }
+  if (Test-WaitingForAssignment $config) { return }
   try {
     Get-Policy $config | Out-Null
     try { Update-LeftOnSystem $config } catch { Write-AgentLog ('Shutdown reminder failed: ' + $_.Exception.Message) }
@@ -1412,13 +1413,28 @@ function Update-AgentScript([string]$EnrolledUser) {
   Mark-Done 'selfupdate'
 }
 
+function Test-WaitingForAssignment($Config) {
+  try {
+    $state = Invoke-AgentRpc $Config 'agent_state' @{ p_token = [string]$Config.token }
+  } catch { return $false }
+  if (-not $state -or [string]$state.state -ne 'pending') { return $false }
+  if (Test-Due 'pendingwait' 30) {
+    Write-AgentLog 'Waiting for IT to assign this computer to an asset. Nothing is reported until then.'
+    Mark-Done 'pendingwait'
+  }
+  Set-Content -Path $StatusPath -Value 'Waiting for IT to assign this computer.' -Encoding UTF8
+  return $true
+}
+
 function Invoke-Enforce {
   $config = Get-AgentConfig
-  $policy = Get-Policy $config
-  $user = [string]$policy.windows_user
-  if (-not $user) { $user = [string]$config.windows_user }
+  $user = [string]$config.windows_user
   try { Protect-AgentStore $user } catch { Write-AgentLog ('Could not tighten the agent folder permissions.') }
   try { Update-AgentScript $user } catch { Write-AgentLog 'Agent update failed. The installed copy keeps running.' }
+  if (Test-WaitingForAssignment $config) { return }
+  $policy = Get-Policy $config
+  if (-not $user) { $user = [string]$policy.windows_user }
+  if ($policy.windows_user) { $user = [string]$policy.windows_user }
   try { Sync-AssetLock $policy } catch { Write-AgentLog 'Could not clear an old sign-in lock.' }
   try { Ensure-WatchTask } catch { Write-AgentLog ('Dashboard check schedule failed: ' + $_.Exception.Message) }
   $grant = ($policy.admin -eq 'elevated' -or $policy.admin -eq 'standing') -and -not [bool]$policy.hold
@@ -1466,6 +1482,9 @@ if ($Watch) {
 }
 
 if ($Sample) {
+  try {
+    if (Test-WaitingForAssignment (Get-AgentConfig)) { exit 0 }
+  } catch { exit 0 }
   try { Ask-RemoteApproval } catch { Write-AgentLog ('Remote support failed: ' + $_.Exception.Message) }
   try { Add-ActivitySample } catch {
     Write-AgentLog ("Activity sample failed: " + $_.Exception.Message)
@@ -1580,6 +1599,18 @@ function Update-LogView {
 function Update-Window {
   try {
     $config = Get-AgentConfig
+    $state = $null
+    try { $state = Invoke-AgentRpc $config 'agent_state' @{ p_token = [string]$config.token } } catch { $state = $null }
+    if ($state -and [string]$state.state -eq 'pending') {
+      $status.Text = @(
+        'Waiting for IT to assign this computer.',
+        ('System: ' + [string]$state.hostname),
+        ('Account: ' + [string]$state.windows_user)
+      ) -join [Environment]::NewLine
+      $rules.Items.Clear()
+      Update-LogView
+      return
+    }
     $policy = Get-Policy $config
     if (-not $nameBox.Text -and $policy.assigned_to) { $nameBox.Text = [string]$policy.assigned_to }
     $adminText = switch ([string]$policy.admin) {
