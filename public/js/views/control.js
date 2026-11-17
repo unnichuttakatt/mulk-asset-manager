@@ -747,6 +747,15 @@ function paint(main) {
       toast('Could not copy. Open supabase/laptop-control.sql in the project.', true);
     }
   }));
+  main.querySelectorAll('[data-pending-row]').forEach(row => {
+    syncAssignRow(row);
+    const by = row.querySelector('[data-assign-by]');
+    const choice = row.querySelector('[data-pending-asset]');
+    if (by) by.onchange = () => syncAssignRow(row);
+    if (choice) choice.onchange = () => {
+      if (by && by.value === 'user') fillUserAssets(choice.value, row.querySelector('[data-user-asset]'));
+    };
+  });
   main.querySelectorAll('[data-assign]').forEach(btn => {
     btn.onclick = () => assignPending(main, btn.dataset.assign);
   });
@@ -867,27 +876,44 @@ function softwareNote(asset) {
     <a class="btn sm" href="#/alerts?asset=${esc(asset.id)}">Review software</a>`;
 }
 
+function computerAssets() {
+  return ui.assets.filter(a => kindOf(a) === 'laptop' || kindOf(a) === 'desktop');
+}
+
+function assetChoiceLabel(asset) {
+  return [asset.tag, asset.description].filter(Boolean).join(' · ');
+}
+
+function assignedUserNames() {
+  const names = new Set();
+  computerAssets().forEach(asset => {
+    const name = (asset.assigned_to || '').trim();
+    if (name) names.add(name);
+  });
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
 function pendingCard() {
   if (!ui.pendingReady) {
     return `<div class="err" style="margin-bottom:16px"><strong>Pending computers are not stored yet.</strong> Run <span class="mono">supabase/agent-pending.sql</span> once in the Supabase SQL editor. Until then, a new install cannot wait for an asset.</div>`;
   }
-  const computers = ui.assets.filter(a => kindOf(a) === 'laptop' || kindOf(a) === 'desktop');
-  const options = computers.map(a => `<option value="${esc(a.id)}">${esc(a.tag)}${a.assigned_to ? ' · ' + esc(a.assigned_to) : ''}${a.description ? ' · ' + esc(a.description) : ''}</option>`).join('');
   const rows = ui.pendingSystems || [];
   const body = rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
-      <th>System name</th><th>Windows account</th><th>Other accounts</th><th>Seen</th><th>Assign to an asset</th>
+      <th>System name</th><th>Windows account</th><th>Other accounts</th><th>Seen</th><th>Assign</th>
     </tr></thead><tbody>
-      ${rows.map(row => `<tr>
+      ${rows.map(row => `<tr data-pending-row="${esc(row.id)}">
         <td class="mono">${esc(row.hostname || '—')}</td>
         <td>${esc(row.windows_user || '—')}</td>
         <td>${esc(row.account_names || '—')}</td>
         <td>${esc(fmtDateTime(row.seen_at || row.created_at) || '')}</td>
         <td>
           <div class="row">
-            <select data-pending-asset="${esc(row.id)}" ${computers.length ? '' : 'disabled'}>
-              <option value="">Choose an asset</option>
-              ${options}
+            <select data-assign-by="${esc(row.id)}" aria-label="Assign by">
+              <option value="asset">Asset ID</option>
+              <option value="user">User name</option>
             </select>
+            <select data-pending-asset="${esc(row.id)}" aria-label="Asset ID"></select>
+            <select data-user-asset="${esc(row.id)}" aria-label="Asset assigned to this user" hidden></select>
             <button type="button" class="btn sm primary" data-assign="${esc(row.id)}">Assign</button>
             <button type="button" class="btn sm" data-dismiss="${esc(row.id)}">Dismiss</button>
           </div>
@@ -900,13 +926,46 @@ function pendingCard() {
   </div>`;
 }
 
+function fillUserAssets(name, select) {
+  const assets = computerAssets().filter(asset => (asset.assigned_to || '').trim() === name);
+  select.innerHTML = `<option value="">${assets.length ? 'Choose an asset' : 'No asset is assigned to this user'}</option>`
+    + assets.map(asset => `<option value="${esc(asset.id)}">${esc(assetChoiceLabel(asset))}</option>`).join('');
+  if (assets.length === 1) select.value = assets[0].id;
+}
+
+function syncAssignRow(row) {
+  const by = row.querySelector('[data-assign-by]');
+  const choice = row.querySelector('[data-pending-asset]');
+  const userAsset = row.querySelector('[data-user-asset]');
+  if (!by || !choice || !userAsset) return;
+  if (by.value === 'user') {
+    const names = assignedUserNames();
+    const current = names.includes(choice.value) ? choice.value : '';
+    choice.setAttribute('aria-label', 'User name');
+    choice.innerHTML = `<option value="">Choose a user</option>`
+      + names.map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+    choice.value = current;
+    userAsset.hidden = false;
+    fillUserAssets(choice.value, userAsset);
+    return;
+  }
+  const computers = computerAssets();
+  const current = computers.some(asset => asset.id === choice.value) ? choice.value : '';
+  choice.setAttribute('aria-label', 'Asset ID');
+  choice.innerHTML = `<option value="">Choose an asset ID</option>`
+    + computers.map(asset => `<option value="${esc(asset.id)}">${esc(assetChoiceLabel(asset))}</option>`).join('');
+  choice.value = current;
+  userAsset.hidden = true;
+  userAsset.innerHTML = '';
+}
+
 function steps(kind) {
   if (kind === 'laptop' || kind === 'desktop') {
     return [
       'Match the serial number on the computer to this asset tag.',
       'The person signs in with their company account.',
       'On the computer, download Mulk Agent and run MulkAgentSetup.exe as Administrator. No code is required. The Mulk Agent window stays visible.',
-      'The computer appears at the top of Control as pending, with its system name and Windows accounts. Choose the asset and assign it. Until then, Mulk Agent waits and does not report.',
+      'The computer appears at the top of Control as pending, with its system name and Windows accounts. Assign it by asset ID, or choose a user and then one asset assigned to that user. Until then, Mulk Agent waits and does not report.',
     ];
   }
   if (kind === 'printer') {
@@ -1217,11 +1276,27 @@ async function denyRequest(main, id) {
 }
 
 async function assignPending(main, id) {
-  const select = main.querySelector(`[data-pending-asset="${CSS.escape(id)}"]`);
-  const assetId = select && select.value;
-  if (!assetId) {
-    toast('Choose the asset this computer belongs to.', true);
-    return;
+  const by = main.querySelector(`[data-assign-by="${CSS.escape(id)}"]`);
+  const choice = main.querySelector(`[data-pending-asset="${CSS.escape(id)}"]`);
+  const userAsset = main.querySelector(`[data-user-asset="${CSS.escape(id)}"]`);
+  const byUser = by && by.value === 'user';
+  let assetId = '';
+  if (byUser) {
+    if (!choice || !choice.value) {
+      toast('Choose the user this computer belongs to.', true);
+      return;
+    }
+    assetId = userAsset && userAsset.value;
+    if (!assetId) {
+      toast('Choose the asset assigned to that user.', true);
+      return;
+    }
+  } else {
+    assetId = choice && choice.value;
+    if (!assetId) {
+      toast('Choose the asset ID this computer belongs to.', true);
+      return;
+    }
   }
   const asset = ui.assets.find(a => a.id === assetId);
   const row = (ui.pendingSystems || []).find(item => item.id === id);

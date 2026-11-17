@@ -77,6 +77,7 @@ h2 { font-size: 15px; font-weight: 600; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .grow { flex: 1; }
 .page-head .row select { width: auto; }
+[data-pending-row] select { width: auto; min-width: 150px; max-width: 280px; }
 .tbl td.desc { min-width: 180px; max-width: 280px; }
 
 @media (max-width: 860px) {
