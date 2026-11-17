@@ -619,7 +619,7 @@ function paint(main) {
     </div>
     <div class="note" style="margin-bottom:16px">
       <strong>How a computer gets connected.</strong>
-      Install <a href="/agent/">Mulk Agent</a> on the Windows laptop or desktop. It is a separate program, and Intune is not required. The person sees a window named Mulk Agent.
+      Install <a href="/agent/">Mulk Agent</a> on the Windows laptop or desktop. It is a separate program, and Intune is not required. The person sees a window named Mulk Agent. After this version is installed once, the computer replaces its own copy when a newer one is published. That check is about every 30 minutes.
       A printer is connected when you add its queue on the company print server.
       A phone stays on the company management profile if you use one later.
       Monitors and other items stay under this register: who has them, where they are, and whether they are on hold.

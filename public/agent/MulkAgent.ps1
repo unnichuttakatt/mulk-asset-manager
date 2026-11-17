@@ -15,6 +15,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$script:AgentBuild = '20261117a'
+$script:UpdateHost = 'https://mulk-asset-manager.vercel.app'
 $Root = 'C:\ProgramData\MulkAgent'
 $AgentFile = Join-Path $Root 'MulkAgent.ps1'
 $ConfigPath = Join-Path $Root 'device.json'
@@ -1365,12 +1367,58 @@ function Invoke-Watch {
   }
 }
 
+function Update-AgentScript([string]$EnrolledUser) {
+  if (-not (Test-Due 'selfupdate' 30)) { return }
+  $remote = ''
+  try {
+    $versionUri = $script:UpdateHost + '/agent/version.txt'
+    $res = Invoke-WebRequest -Uri $versionUri -UseBasicParsing -MaximumRedirection 0
+    $remote = ([string]$res.Content).Trim()
+  } catch {
+    Write-AgentLog 'Agent update check could not reach the company site. The installed copy keeps running.'
+    Mark-Done 'selfupdate'
+    return
+  }
+  if ($remote -notmatch '^[0-9]{8}[a-z]$') {
+    Write-AgentLog 'Agent update check returned an unexpected version. The installed copy keeps running.'
+    Mark-Done 'selfupdate'
+    return
+  }
+  if ($remote -eq $script:AgentBuild) {
+    Mark-Done 'selfupdate'
+    return
+  }
+  $tmp = Join-Path $Root 'MulkAgent.ps1.new'
+  try {
+    $scriptUri = $script:UpdateHost + '/agent/MulkAgent.ps1'
+    Invoke-WebRequest -Uri $scriptUri -OutFile $tmp -UseBasicParsing -MaximumRedirection 0
+    $item = Get-Item -Path $tmp
+    if ($item.Length -lt 20000 -or $item.Length -gt 1500000) { throw 'The downloaded agent is the wrong size.' }
+    $head = @(Get-Content -Path $tmp -TotalCount 12 -ErrorAction Stop)
+    if (($head -join "`n") -notmatch 'Mulk Agent') { throw 'The downloaded file is not Mulk Agent.' }
+    $expected = "AgentBuild = '" + $remote + "'"
+    if (-not (Select-String -Path $tmp -Pattern $expected -SimpleMatch -Quiet)) {
+      throw 'The downloaded agent does not match the published version.'
+    }
+    Move-Item -Path $tmp -Destination $AgentFile -Force
+    try { Protect-AgentStore $EnrolledUser } catch { }
+    Write-AgentLog ('Mulk Agent updated to ' + $remote + '. Scheduled checks use it on the next run. Close the Mulk Agent window and open it again.')
+  } catch {
+    Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
+    $detail = [string]$_.Exception.Message
+    if ($detail.Length -gt 180) { $detail = $detail.Substring(0, 180) }
+    Write-AgentLog ('Agent update failed. The installed copy keeps running. ' + $detail)
+  }
+  Mark-Done 'selfupdate'
+}
+
 function Invoke-Enforce {
   $config = Get-AgentConfig
   $policy = Get-Policy $config
   $user = [string]$policy.windows_user
   if (-not $user) { $user = [string]$config.windows_user }
   try { Protect-AgentStore $user } catch { Write-AgentLog ('Could not tighten the agent folder permissions.') }
+  try { Update-AgentScript $user } catch { Write-AgentLog 'Agent update failed. The installed copy keeps running.' }
   try { Sync-AssetLock $policy } catch { Write-AgentLog 'Could not clear an old sign-in lock.' }
   try { Ensure-WatchTask } catch { Write-AgentLog ('Dashboard check schedule failed: ' + $_.Exception.Message) }
   $grant = ($policy.admin -eq 'elevated' -or $policy.admin -eq 'standing') -and -not [bool]$policy.hold
