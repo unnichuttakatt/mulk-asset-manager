@@ -964,7 +964,7 @@ function steps(kind) {
     return [
       'Match the serial number on the computer to this asset tag.',
       'The person signs in with their company account.',
-      'On the computer, download Mulk Agent and run MulkAgentSetup.exe as Administrator. No code is required. The Mulk Agent window stays visible.',
+      'On the computer, download Mulk Agent and run MulkAgentSetup.exe as Administrator. No code is required. It stays quiet. The icon is behind the up arrow at the bottom right of the taskbar, and the window opens only when someone clicks it.',
       'The computer appears at the top of Control as pending, with its system name and Windows accounts. Assign it by asset ID, or choose a user and then one asset assigned to that user. Until then, Mulk Agent waits and does not report.',
     ];
   }

@@ -24,7 +24,7 @@
     <h1>Mulk Agent</h1>
     <p class="muted">The company program for a Windows laptop or desktop. It is a separate install from the asset register. Intune is not required.</p>
     <div class="card">
-      <p>The window stays on the computer with the name Mulk Agent. The person can read the rules. They can ask for admin rights. IT approves or denies that request in Control. A short approval adds that Windows account to Administrators and removes it when the time ends. USB storage follows the rule set.</p>
+      <p>Mulk Agent stays quiet. Its icon is in the taskbar corner, behind the up arrow at the bottom right. The person clicks that icon when they need support. The window does not open by itself, and PowerShell does not stay on the screen. They can ask for admin rights from that window. IT approves or denies that request in Control. A short approval adds that Windows account to Administrators and removes it when the time ends. USB storage follows the rule set.</p>
       <p>Every few minutes the program sends the installed software list: program name, version, and publisher from the Windows uninstall list. The first list is the baseline. A program that appears later is an alert on the Alerts page. It also sends health: BitLocker, Microsoft Defender, the firewall, free disk space, whether a restart is waiting, the manufacturer, model, serial, memory, the names of local administrators, and the names of startup programs. It does not read the files those programs open.</p>
       <p>It also sends the public IP address and the city and country that IP belongs to. A country other than the UAE is an alert. It does not use GPS. USB devices already connected at the first check are the baseline. A USB device plugged in after that is an alert, by device name only. Files on the drive are not listed.</p>
       <p>While someone is at the computer, it counts active minutes and which app is in front. Google, Bing, DuckDuckGo, Yahoo, and YouTube searches made after this starts are listed under Usage. Searches already in the browser are not imported. Page contents, documents, the screen, and the keyboard are not collected.</p>
@@ -38,16 +38,17 @@
       <li>Download <a href="/agent/MulkAgentSetup.exe">Mulk Agent setup</a>. On the computer, run <strong>MulkAgentSetup.exe</strong>. Windows asks for administrator approval. No code is required.</li>
       <li>Confirm the Windows account of the person who uses that computer, then choose Install.</li>
       <li>In Control, the computer appears under <strong>Installed systems waiting for an asset</strong>, with its system name and Windows accounts. Choose the asset and assign it.</li>
-      <li>Leave the Mulk Agent window available. It also opens at the next sign-in. It waits, and does not report, until that assignment is made.</li>
+      <li>The window does not open. Click the up arrow at the bottom right of the taskbar and choose Mulk Agent when support is needed. It waits, and does not report, until an admin assigns it.</li>
     </ol>
     <h2>Update an existing install</h2>
-    <p>Once this version is on a computer, it checks the company site about every 30 minutes. When a newer Mulk Agent is published, the computer replaces its own copy. The scheduled checks use the new copy on the next run. Close the Mulk Agent window and open it again to see the new window. The copy already installed does not know how to do that yet, so run this once in an Administrator PowerShell. It does not need a new code.</p>
+    <p>Once this version is on a computer, it checks the company site about every 30 minutes. When a newer Mulk Agent is published, the computer replaces its own copy. The scheduled checks use the new copy on the next run. Close any Mulk Agent or PowerShell window that is already open. The icon then stays behind the up arrow. Computers that still have an older copy need this command once in an Administrator PowerShell. It does not need a new code.</p>
     <pre>powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest https://mulk-asset-manager.vercel.app/agent/MulkAgent.ps1 -OutFile C:\ProgramData\MulkAgent\MulkAgent.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Enforce"</pre>
     <h2>Remove it</h2>
     <p>In an Administrator PowerShell:</p>
     <pre>schtasks /Delete /TN "Mulk Agent Enforce" /F
 schtasks /Delete /TN "Mulk Agent Watch" /F
 schtasks /Delete /TN "Mulk Agent Sample" /F
+schtasks /Delete /TN "Mulk Agent Tray" /F
 Remove-Item "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\Mulk Agent.lnk" -Force
 Remove-Item "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Mulk Agent.lnk" -Force
 Remove-Item C:\ProgramData\MulkAgent -Recurse -Force</pre>

@@ -81,9 +81,11 @@ static DWORD WINAPI InstallThread(LPVOID unused) {
   command[1199] = 0;
   ZeroMemory(&si, sizeof(si));
   si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_HIDE;
   ZeroMemory(&pi, sizeof(pi));
   SetStatus(L"Installing…");
-  if (!CreateProcessW(powershell, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+  if (!CreateProcessW(powershell, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
     SetStatus(L"Windows could not start the installer.");
     MessageBoxW(NULL, L"Windows could not start the installer.", L"Mulk Agent setup", MB_ICONERROR);
     EnableWindow(GetDlgItem(GetParent(g_status), IDC_GO), TRUE);

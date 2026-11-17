@@ -11,11 +11,13 @@
 param(
   [switch]$Enforce,
   [switch]$Sample,
-  [switch]$Watch
+  [switch]$Watch,
+  [switch]$Tray,
+  [switch]$Show
 )
 
 $ErrorActionPreference = 'Stop'
-$script:AgentBuild = '20261117b'
+$script:AgentBuild = '20261117d'
 $script:UpdateHost = 'https://mulk-asset-manager.vercel.app'
 $Root = 'C:\ProgramData\MulkAgent'
 $AgentFile = Join-Path $Root 'MulkAgent.ps1'
@@ -792,10 +794,11 @@ function Send-Usage($Config) {
 function Ensure-SampleTask {
   try { $user = [string](Get-AgentConfig).windows_user } catch { return }
   if (-not $user) { return }
-  $tr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Sample'
+  Write-HiddenLauncher
+  $tr = 'wscript.exe //B //Nologo C:\ProgramData\MulkAgent\run-hidden.vbs Sample'
   & schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 5 /RU $user /IT /RL LIMITED /TR $tr /F | Out-Null
   if ($LASTEXITCODE -ne 0) {
-    Write-AgentLog 'The activity sample could not be scheduled. Leave the Mulk Agent window open so active time is still counted.'
+    Write-AgentLog 'The activity sample could not be scheduled.'
   }
 }
 
@@ -1287,8 +1290,52 @@ function Sync-AssetLock($policy) {
   Write-AgentLog 'Sign-in lock was removed. This computer no longer blocks sign-in.'
 }
 
+function Write-HiddenLauncher {
+  $path = Join-Path $Root 'run-hidden.vbs'
+  @'
+If WScript.Arguments.Count = 0 Then WScript.Quit 1
+mode = WScript.Arguments(0)
+sta = ""
+If mode = "Tray" Or mode = "Show" Then sta = "-STA "
+ps = "powershell.exe -NoProfile " & sta & "-WindowStyle Hidden -ExecutionPolicy Bypass -File ""C:\ProgramData\MulkAgent\MulkAgent.ps1"" -" & mode
+CreateObject("Wscript.Shell").Run ps, 0, False
+'@ | Set-Content -Path $path -Encoding ASCII
+}
+
+function Enable-QuietAgent([string]$EnrolledUser) {
+  Write-HiddenLauncher
+  $startup = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\StartUp\Mulk Agent.lnk'
+  $openedAtSignIn = Test-Path -Path $startup
+  if ($openedAtSignIn) { Remove-Item -Path $startup -Force -ErrorAction SilentlyContinue }
+  $menuDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'
+  if ((Test-Path $menuDir) -and ((Test-Due 'quiet' 720) -or $openedAtSignIn)) {
+    try {
+      $shell = New-Object -ComObject WScript.Shell
+      $link = $shell.CreateShortcut((Join-Path $menuDir 'Mulk Agent.lnk'))
+      $link.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+      $link.Arguments = '//B //Nologo C:\ProgramData\MulkAgent\run-hidden.vbs Show'
+      $link.WorkingDirectory = $Root
+      $link.WindowStyle = 7
+      $link.Description = 'Open Mulk Agent'
+      $link.Save()
+    } catch { }
+  }
+  if (-not $openedAtSignIn -and -not (Test-Due 'quiet' 720)) { return }
+  $launch = 'wscript.exe //B //Nologo C:\ProgramData\MulkAgent\run-hidden.vbs'
+  & schtasks.exe /Create /TN 'Mulk Agent Enforce' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR "$launch Enforce" /F | Out-Null
+  & schtasks.exe /Create /TN 'Mulk Agent Watch' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR "$launch Watch" /F | Out-Null
+  if ($EnrolledUser) {
+    & schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 5 /RU $EnrolledUser /IT /RL LIMITED /TR "$launch Sample" /F | Out-Null
+    & schtasks.exe /Create /TN 'Mulk Agent Tray' /SC ONLOGON /RU $EnrolledUser /IT /RL LIMITED /TR "$launch Tray" /F | Out-Null
+    & schtasks.exe /Run /TN 'Mulk Agent Tray' | Out-Null
+  }
+  Mark-Done 'quiet'
+  Write-AgentLog 'Mulk Agent is running quietly. The window stays closed until someone opens the tray icon.'
+}
+
 function Ensure-WatchTask {
-  $tr = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Watch'
+  Write-HiddenLauncher
+  $tr = 'wscript.exe //B //Nologo C:\ProgramData\MulkAgent\run-hidden.vbs Watch'
   & schtasks.exe /Create /TN 'Mulk Agent Watch' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR $tr /F | Out-Null
   if ($LASTEXITCODE -ne 0) {
     Write-AgentLog 'The dashboard check could not be scheduled. The five-minute check still runs.'
@@ -1431,6 +1478,7 @@ function Invoke-Enforce {
   $user = [string]$config.windows_user
   try { Protect-AgentStore $user } catch { Write-AgentLog ('Could not tighten the agent folder permissions.') }
   try { Update-AgentScript $user } catch { Write-AgentLog 'Agent update failed. The installed copy keeps running.' }
+  try { Enable-QuietAgent $user } catch { Write-AgentLog 'Could not hide the agent windows.' }
   if (Test-WaitingForAssignment $config) { return }
   $policy = Get-Policy $config
   if (-not $user) { $user = [string]$policy.windows_user }
@@ -1493,11 +1541,16 @@ if ($Sample) {
   exit 0
 }
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-$mutex = New-Object System.Threading.Mutex($false, 'Local\MulkAgentWindow')
-if (-not $mutex.WaitOne(0, $false)) { exit 0 }
+function Show-SupportWindow {
+  if ($script:supportForm -and -not $script:supportForm.IsDisposed) {
+    $script:supportForm.ShowInTaskbar = $true
+    $script:supportForm.Show()
+    $script:supportForm.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $script:supportForm.Activate()
+    return
+  }
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Mulk Agent'
@@ -1515,7 +1568,7 @@ $title.Location = New-Object System.Drawing.Point(20, 16)
 $form.Controls.Add($title)
 
 $intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'This window is the company agent for this computer. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. IT can set the local Administrator password once. A company installer runs only when IT sends it to several computers from Bulk install. It does not lock sign-in. If this computer is left running after office hours, 8:00 AM to 6:00 PM, you will be reminded to shut it down the next time you use it. If you ask for remote help, IT can connect only after you choose Allow. Quick Assist then opens on this screen. The screen is not saved. It does not read files, capture the screen, record the keyboard, or use GPS.'
+$intro.Text = 'Open this window from the Mulk Agent icon when you need support. The icon sits in the taskbar corner, behind the up arrow. The rest of the time Mulk Agent stays quiet. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. It does not lock sign-in. If you ask for remote help, IT can connect only after you choose Allow. It does not read files, capture the screen, record the keyboard, or use GPS.'
 $intro.Size = New-Object System.Drawing.Size(460, 156)
 $intro.Location = New-Object System.Drawing.Point(20, 52)
 $form.Controls.Add($intro)
@@ -1678,17 +1731,83 @@ $help.Add_Click({
 $script:supportPrompt = $false
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 300000
-$timer.Add_Tick({
-  try { Add-ActivitySample } catch { }
-  try { Ask-RemoteApproval } catch { }
-  Update-Window
-})
+$timer.Add_Tick({ Update-Window })
 $timer.Start()
-$form.Add_Shown({
-  Update-Window
-  try { Update-Unattended } catch { }
-  try { Ask-RemoteApproval } catch { }
+$form.ShowInTaskbar = $true
+$form.Add_FormClosing({
+  $_.Cancel = $true
+  $form.Hide()
+  $form.ShowInTaskbar = $false
 })
-[void]$form.ShowDialog()
-$timer.Stop()
-$mutex.ReleaseMutex() | Out-Null
+$form.Add_Shown({ Update-Window })
+$script:supportForm = $form
+$form.Show()
+$form.Activate()
+}
+
+function New-TrayIcon {
+  $bmp = New-Object System.Drawing.Bitmap 16, 16
+  $draw = [System.Drawing.Graphics]::FromImage($bmp)
+  $draw.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $draw.Clear([System.Drawing.Color]::FromArgb(14, 94, 86))
+  $brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
+  $draw.FillEllipse($brush, 3, 3, 10, 10)
+  $brush.Dispose()
+  $draw.Dispose()
+  $handle = $bmp.GetHicon()
+  return [System.Drawing.Icon]::FromHandle($handle)
+}
+
+function Start-Tray {
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
+  $mutex = New-Object System.Threading.Mutex($false, 'Local\MulkAgentTray')
+  $created = $false
+  if (-not $mutex.WaitOne(0, $false)) {
+    if ($Show) { Set-Content -Path (Join-Path $Root 'open.request') -Value 'open' -Encoding ASCII }
+    exit 0
+  }
+  $created = $true
+  $notify = New-Object System.Windows.Forms.NotifyIcon
+  try { $notify.Icon = New-TrayIcon } catch { $notify.Icon = [System.Drawing.SystemIcons]::Application }
+  $notify.Text = 'Mulk Agent'
+  $notify.Visible = $true
+  $menu = New-Object System.Windows.Forms.ContextMenuStrip
+  $openItem = $menu.Items.Add('Open Mulk Agent')
+  $openItem.Add_Click({ Show-SupportWindow })
+  $notify.ContextMenuStrip = $menu
+  $notify.Add_MouseClick({
+    if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-SupportWindow }
+  })
+  $timer = New-Object System.Windows.Forms.Timer
+  $timer.Interval = 2000
+  $timer.Add_Tick({
+    $script:trayTicks = [int]$script:trayTicks + 1
+    $flag = Join-Path $Root 'open.request'
+    if (Test-Path -Path $flag) {
+      Remove-Item -Path $flag -Force -ErrorAction SilentlyContinue
+      Show-SupportWindow
+    }
+    if (($script:trayTicks % 150) -eq 0) {
+      try { Add-ActivitySample } catch { }
+      try { Ask-RemoteApproval } catch { }
+      try { Update-Unattended } catch { }
+    }
+  })
+  $script:trayTicks = 0
+  $timer.Start()
+  if ($Show -or (Test-Path (Join-Path $Root 'open.request'))) {
+    Remove-Item -Path (Join-Path $Root 'open.request') -Force -ErrorAction SilentlyContinue
+    Show-SupportWindow
+  }
+  [System.Windows.Forms.Application]::Run()
+  if ($created) { $mutex.ReleaseMutex() | Out-Null }
+}
+
+if ($Tray -or $Show -or (-not $Enforce -and -not $Watch -and -not $Sample)) {
+  try { Start-Tray } catch {
+    Write-AgentLog ('The tray icon could not start: ' + $_.Exception.Message)
+    exit 1
+  }
+  exit 0
+}

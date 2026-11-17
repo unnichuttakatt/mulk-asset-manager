@@ -1,5 +1,5 @@
 # Installs Mulk Agent on this Windows computer. Run it from an Administrator PowerShell.
-# The person who uses the computer can see the Mulk Agent window. It is not a hidden install.
+# The checks run quietly. The window opens only from the tray icon.
 param(
   [string]$Code,
   [string]$WindowsUser,
@@ -92,27 +92,35 @@ Set-LockedAcl $devicePath $false
 New-Item -ItemType File -Force -Path (Join-Path $Root 'agent.log') | Out-Null
 Set-LockedAcl (Join-Path $Root 'agent.log') $true
 
+@'
+If WScript.Arguments.Count = 0 Then WScript.Quit 1
+mode = WScript.Arguments(0)
+sta = ""
+If mode = "Tray" Or mode = "Show" Then sta = "-STA "
+ps = "powershell.exe -NoProfile " & sta & "-WindowStyle Hidden -ExecutionPolicy Bypass -File ""C:\ProgramData\MulkAgent\MulkAgent.ps1"" -" & mode
+CreateObject("Wscript.Shell").Run ps, 0, False
+'@ | Set-Content -Path (Join-Path $Root 'run-hidden.vbs') -Encoding ASCII
+
 $startup = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\StartUp\Mulk Agent.lnk'
+if (Test-Path $startup) { Remove-Item $startup -Force }
 $menu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Mulk Agent.lnk'
 $shell = New-Object -ComObject WScript.Shell
-foreach ($linkPath in @($startup, $menu)) {
-  $link = $shell.CreateShortcut($linkPath)
-  $link.TargetPath = 'powershell.exe'
-  $link.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "C:\ProgramData\MulkAgent\MulkAgent.ps1"'
-  $link.WorkingDirectory = $Root
-  $link.WindowStyle = 1
-  $link.Description = 'Mulk Agent'
-  $link.Save()
-}
+$link = $shell.CreateShortcut($menu)
+$link.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+$link.Arguments = '//B //Nologo C:\ProgramData\MulkAgent\run-hidden.vbs Show'
+$link.WorkingDirectory = $Root
+$link.WindowStyle = 7
+$link.Description = 'Open Mulk Agent'
+$link.Save()
 
-$task = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Enforce'
-schtasks.exe /Create /TN 'Mulk Agent Enforce' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR $task /F | Out-Null
-$watch = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Watch'
-schtasks.exe /Create /TN 'Mulk Agent Watch' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR $watch /F | Out-Null
-$sample = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\MulkAgent\MulkAgent.ps1 -Sample'
-schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 5 /RU $WindowsUser /IT /RL LIMITED /TR $sample /F | Out-Null
+$launch = 'wscript.exe //B //Nologo C:\ProgramData\MulkAgent\run-hidden.vbs'
+schtasks.exe /Create /TN 'Mulk Agent Enforce' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR "$launch Enforce" /F | Out-Null
+schtasks.exe /Create /TN 'Mulk Agent Watch' /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR "$launch Watch" /F | Out-Null
+schtasks.exe /Create /TN 'Mulk Agent Sample' /SC MINUTE /MO 5 /RU $WindowsUser /IT /RL LIMITED /TR "$launch Sample" /F | Out-Null
+schtasks.exe /Create /TN 'Mulk Agent Tray' /SC ONLOGON /RU $WindowsUser /IT /RL LIMITED /TR "$launch Tray" /F | Out-Null
 
 Write-Host "Mulk Agent installed on $($result.hostname) for $($result.windows_user)."
+Write-Host 'It stays quiet. Open it from the up arrow at the bottom right of the taskbar when support is needed.'
 Write-Host 'It stays pending until an admin assigns it to an asset in Control.'
-Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$agentFile
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $agentFile -Enforce
+Start-Process -FilePath "$env:SystemRoot\System32\wscript.exe" -ArgumentList '//B','//Nologo',(Join-Path $Root 'run-hidden.vbs'),'Tray' -WindowStyle Hidden
+Start-Process -FilePath "$env:SystemRoot\System32\wscript.exe" -ArgumentList '//B','//Nologo',(Join-Path $Root 'run-hidden.vbs'),'Enforce' -WindowStyle Hidden
