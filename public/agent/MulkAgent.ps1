@@ -1,10 +1,10 @@
 # Mulk Agent. A visible company program for one Windows computer.
-# It shows the rules, sends an admin request, and applies the decision IT approved.
+# It is a small box for admin rights and remote help, and it applies the decision IT approved.
 # It reports installed programs, USB devices, the public IP city/country,
 # web searches, active time, and which app is in front.
 # It does not record keystrokes, screenshots, documents, page contents, or GPS.
 # Sign-in lock is no longer used. If an older copy blocked sign-in, this copy removes that block.
-# IT can ask to open Windows Quick Assist. The person must choose Allow first.
+# IT reads a code. The person types it before Windows Quick Assist opens.
 # A computer still running after 6:00 PM reminds the person, the next time they
 # use it, to shut down when leaving. Office hours are 8:00 AM to 6:00 PM.
 # The screen is not saved, and the keyboard is not recorded.
@@ -17,7 +17,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:AgentBuild = '20261117d'
+$script:AgentBuild = '20261117e'
 $script:UpdateHost = 'https://mulk-asset-manager.vercel.app'
 $Root = 'C:\ProgramData\MulkAgent'
 $AgentFile = Join-Path $Root 'MulkAgent.ps1'
@@ -1348,54 +1348,101 @@ function Start-QuickAssist {
   else { Start-Process 'ms-quick-assist:' | Out-Null }
 }
 
+function Show-AgentMessage([string]$Text) {
+  Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+  [System.Windows.Forms.MessageBox]::Show($Text, 'Mulk Agent') | Out-Null
+}
+
+function Read-SupportCode {
+  Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+  Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+  $dialog = New-Object System.Windows.Forms.Form
+  $dialog.Text = 'Mulk Agent'
+  $dialog.FormBorderStyle = 'FixedDialog'
+  $dialog.StartPosition = 'CenterScreen'
+  $dialog.ClientSize = New-Object System.Drawing.Size(360, 188)
+  $dialog.MaximizeBox = $false
+  $dialog.MinimizeBox = $false
+  $dialog.TopMost = $true
+  $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+  $label = New-Object System.Windows.Forms.Label
+  $label.Text = 'IT wants to connect. Enter the code they read to you. The screen is not saved.'
+  $label.SetBounds(16, 16, 328, 48)
+  $box = New-Object System.Windows.Forms.TextBox
+  $box.SetBounds(16, 72, 328, 32)
+  $box.Font = New-Object System.Drawing.Font('Segoe UI', 16)
+  $box.MaxLength = 8
+  $approve = New-Object System.Windows.Forms.Button
+  $approve.Text = 'Approve'
+  $approve.SetBounds(16, 124, 140, 36)
+  $approve.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $later = New-Object System.Windows.Forms.Button
+  $later.Text = 'Not now'
+  $later.SetBounds(168, 124, 140, 36)
+  $later.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+  $dialog.AcceptButton = $approve
+  $dialog.CancelButton = $later
+  $dialog.Controls.AddRange(@($label, $box, $approve, $later))
+  $answer = $dialog.ShowDialog()
+  $typed = $box.Text.Trim()
+  $dialog.Dispose()
+  if ($answer -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+  return $typed
+}
+
+function Show-PendingNotice($Config) {
+  $message = Invoke-AgentRpc $Config 'agent_take_notice' @{ p_token = [string]$Config.token }
+  if (-not $message) { return }
+  $text = [string]$message
+  if ($text.Length -gt 1 -and $text.StartsWith('"') -and $text.EndsWith('"')) { $text = $text.Substring(1, $text.Length - 2) }
+  if ($text.Trim().Length -lt 1) { return }
+  Show-AgentMessage $text
+  Write-AgentLog 'Showed an IT reply on this computer.'
+}
+
 function Ask-RemoteApproval {
   if ($script:supportPrompt) { return }
   $config = Get-AgentConfig
-  try {
-    $policy = Get-Policy $config
-  } catch { return }
+  try { Get-Policy $config | Out-Null } catch { return }
   $job = Invoke-AgentRpc $config 'agent_take_support' @{ p_token = [string]$config.token }
   if (-not $job -or -not $job.id) { return }
-  $code = [string]$job.assist_code
   $script:supportPrompt = $true
   $ok = $false
-  $detail = 'The person declined. Nothing was opened.'
+  $detail = 'The person did not enter the code. Nothing was opened.'
   try {
-    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-    $answer = [System.Windows.Forms.MessageBox]::Show(
-      "IT wants to connect to this computer with Windows Quick Assist.`r`n`r`nYou will see the Quick Assist window. The screen is not saved, and the keyboard is not recorded.`r`n`r`nAllow this connection?",
-      'Mulk Agent',
-      [System.Windows.Forms.MessageBoxButtons]::YesNo,
-      [System.Windows.Forms.MessageBoxIcon]::Question
-    )
-    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
-      $detail = 'The person declined. Nothing was opened.'
-    } else {
-      if ($code) {
-        [System.Windows.Forms.MessageBox]::Show(
-          "Allowed. In the Quick Assist window, enter this code: $code`r`n`r`nThe screen is not saved.",
-          'Mulk Agent'
-        ) | Out-Null
+    while ($true) {
+      $typed = Read-SupportCode
+      if ($null -eq $typed) { break }
+      $matched = Invoke-AgentRpc $config 'agent_confirm_support' @{
+        p_token = [string]$config.token
+        p_job = [string]$job.id
+        p_code = $typed
       }
-      Start-QuickAssist
-      $ok = $true
-      $detail = 'The person allowed it. Quick Assist opened. The screen is not saved.'
+      $typed = $null
+      if ($matched -eq $true -or [string]$matched -eq 'true') {
+        Start-QuickAssist
+        Show-AgentMessage 'Approved. Quick Assist is open. Stay on this screen so IT can see it. The screen is not saved.'
+        $ok = $true
+        $detail = 'The person entered the code. Quick Assist opened. The screen is not saved.'
+        break
+      }
+      Show-AgentMessage 'That code does not match. Ask IT to read it again.'
     }
   } catch {
     $detail = [string]$_.Exception.Message
-    if ($code -and $detail.Contains($code)) { $detail = 'Remote support could not open.' }
     if ($detail.Length -gt 240) { $detail = $detail.Substring(0, 240) }
   } finally {
-    $code = ''
     $script:supportPrompt = $false
   }
-  Invoke-AgentRpc $config 'agent_finish_support' @{
-    p_token = [string]$config.token
-    p_job = [string]$job.id
-    p_ok = $ok
-    p_detail = $detail
+  if (-not $ok) {
+    Invoke-AgentRpc $config 'agent_finish_support' @{
+      p_token = [string]$config.token
+      p_job = [string]$job.id
+      p_ok = $false
+      p_detail = $detail
+    }
   }
-  if ($ok) { Write-AgentLog 'The person allowed remote support. Quick Assist opened. The screen is not saved and the keyboard is not recorded.' }
+  if ($ok) { Write-AgentLog 'The person entered the support code. Quick Assist opened. The screen is not saved.' }
   else { Write-AgentLog $detail }
 }
 
@@ -1546,203 +1593,184 @@ function Show-SupportWindow {
     $script:supportForm.ShowInTaskbar = $true
     $script:supportForm.Show()
     $script:supportForm.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    if ($script:supportForm.Tag) { & $script:supportForm.Tag }
     $script:supportForm.Activate()
     return
   }
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -AssemblyName System.Drawing
 
-$form = New-Object System.Windows.Forms.Form
-$form.Text = 'Mulk Agent'
-$form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(520, 900)
-$form.MinimumSize = New-Object System.Drawing.Size(480, 820)
-$form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
-$form.BackColor = [System.Drawing.Color]::FromArgb(244, 245, 247)
+  $form = New-Object System.Windows.Forms.Form
+  $form.Text = 'Mulk Agent'
+  $form.FormBorderStyle = 'FixedDialog'
+  $form.StartPosition = 'CenterScreen'
+  $form.ClientSize = New-Object System.Drawing.Size(380, 430)
+  $form.MaximizeBox = $false
+  $form.MinimizeBox = $true
+  $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+  $form.BackColor = [System.Drawing.Color]::White
 
-$title = New-Object System.Windows.Forms.Label
-$title.Text = 'Mulk Agent'
-$title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
-$title.AutoSize = $true
-$title.Location = New-Object System.Drawing.Point(20, 16)
-$form.Controls.Add($title)
+  $title = New-Object System.Windows.Forms.Label
+  $title.Text = 'Mulk Agent'
+  $title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
+  $title.SetBounds(16, 14, 348, 32)
+  $form.Controls.Add($title)
 
-$intro = New-Object System.Windows.Forms.Label
-$intro.Text = 'Open this window from the Mulk Agent icon when you need support. The icon sits in the taskbar corner, behind the up arrow. The rest of the time Mulk Agent stays quiet. It reports installed programs, computer health, USB device names, the city and country of the public IP, web search text, active time, and which app is in front. It does not lock sign-in. If you ask for remote help, IT can connect only after you choose Allow. It does not read files, capture the screen, record the keyboard, or use GPS.'
-$intro.Size = New-Object System.Drawing.Size(460, 156)
-$intro.Location = New-Object System.Drawing.Point(20, 52)
-$form.Controls.Add($intro)
+  $status = New-Object System.Windows.Forms.Label
+  $status.Text = 'Checking with IT…'
+  $status.ForeColor = [System.Drawing.Color]::FromArgb(70, 78, 86)
+  $status.SetBounds(16, 48, 348, 52)
+  $form.Controls.Add($status)
 
-$status = New-Object System.Windows.Forms.Label
-$status.Size = New-Object System.Drawing.Size(460, 88)
-$status.Location = New-Object System.Drawing.Point(20, 216)
-$form.Controls.Add($status)
+  $adminHead = New-Object System.Windows.Forms.Label
+  $adminHead.Text = 'Admin rights'
+  $adminHead.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
+  $adminHead.SetBounds(16, 108, 348, 22)
+  $form.Controls.Add($adminHead)
 
-$rules = New-Object System.Windows.Forms.ListBox
-$rules.Size = New-Object System.Drawing.Size(460, 110)
-$rules.Location = New-Object System.Drawing.Point(20, 310)
-$form.Controls.Add($rules)
+  $nameBox = New-Object System.Windows.Forms.TextBox
+  $nameBox.SetBounds(16, 134, 348, 28)
+  $nameHint = New-Object System.Windows.Forms.Label
+  $nameHint.Text = 'Your name'
+  $nameHint.ForeColor = [System.Drawing.Color]::FromArgb(120, 128, 136)
+  $nameHint.SetBounds(24, 138, 120, 20)
+  $form.Controls.Add($nameBox)
+  $form.Controls.Add($nameHint)
+  $nameHint.BringToFront()
 
-$nameLabel = New-Object System.Windows.Forms.Label
-$nameLabel.Text = 'Your name'
-$nameLabel.Location = New-Object System.Drawing.Point(20, 428)
-$nameLabel.AutoSize = $true
-$form.Controls.Add($nameLabel)
+  $reasonBox = New-Object System.Windows.Forms.TextBox
+  $reasonBox.SetBounds(16, 170, 348, 28)
+  $reasonHint = New-Object System.Windows.Forms.Label
+  $reasonHint.Text = 'Why you need it'
+  $reasonHint.ForeColor = [System.Drawing.Color]::FromArgb(120, 128, 136)
+  $reasonHint.SetBounds(24, 174, 160, 20)
+  $form.Controls.Add($reasonBox)
+  $form.Controls.Add($reasonHint)
+  $reasonHint.BringToFront()
 
-$nameBox = New-Object System.Windows.Forms.TextBox
-$nameBox.Location = New-Object System.Drawing.Point(20, 450)
-$nameBox.Size = New-Object System.Drawing.Size(460, 28)
-$form.Controls.Add($nameBox)
+  $ask = New-Object System.Windows.Forms.Button
+  $ask.Text = 'Request admin rights'
+  $ask.SetBounds(16, 208, 348, 36)
+  $ask.FlatStyle = 'Flat'
+  $ask.BackColor = [System.Drawing.Color]::FromArgb(14, 94, 86)
+  $ask.ForeColor = [System.Drawing.Color]::White
+  $ask.FlatAppearance.BorderSize = 0
+  $form.Controls.Add($ask)
 
-$reasonLabel = New-Object System.Windows.Forms.Label
-$reasonLabel.Text = 'Why you need admin rights'
-$reasonLabel.Location = New-Object System.Drawing.Point(20, 486)
-$reasonLabel.AutoSize = $true
-$form.Controls.Add($reasonLabel)
+  $helpHead = New-Object System.Windows.Forms.Label
+  $helpHead.Text = 'Remote help'
+  $helpHead.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
+  $helpHead.SetBounds(16, 258, 348, 22)
+  $form.Controls.Add($helpHead)
 
-$reasonBox = New-Object System.Windows.Forms.TextBox
-$reasonBox.Location = New-Object System.Drawing.Point(20, 508)
-$reasonBox.Size = New-Object System.Drawing.Size(460, 28)
-$form.Controls.Add($reasonBox)
+  $helpBox = New-Object System.Windows.Forms.TextBox
+  $helpBox.SetBounds(16, 284, 348, 28)
+  $helpHint = New-Object System.Windows.Forms.Label
+  $helpHint.Text = 'What do you need help with'
+  $helpHint.ForeColor = [System.Drawing.Color]::FromArgb(120, 128, 136)
+  $helpHint.SetBounds(24, 288, 220, 20)
+  $form.Controls.Add($helpBox)
+  $form.Controls.Add($helpHint)
+  $helpHint.BringToFront()
 
-$ask = New-Object System.Windows.Forms.Button
-$ask.Text = 'Request admin rights'
-$ask.Location = New-Object System.Drawing.Point(20, 544)
-$ask.Size = New-Object System.Drawing.Size(180, 34)
-$form.Controls.Add($ask)
+  $help = New-Object System.Windows.Forms.Button
+  $help.Text = 'Request remote help'
+  $help.SetBounds(16, 322, 348, 36)
+  $help.FlatStyle = 'Flat'
+  $help.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 28)
+  $help.ForeColor = [System.Drawing.Color]::White
+  $help.FlatAppearance.BorderSize = 0
+  $form.Controls.Add($help)
 
-$refresh = New-Object System.Windows.Forms.Button
-$refresh.Text = 'Refresh'
-$refresh.Location = New-Object System.Drawing.Point(210, 544)
-$refresh.Size = New-Object System.Drawing.Size(100, 34)
-$form.Controls.Add($refresh)
+  $foot = New-Object System.Windows.Forms.Label
+  $foot.Text = 'IT replies in a popup on this computer. A remote session starts only after you type the code IT reads to you.'
+  $foot.ForeColor = [System.Drawing.Color]::FromArgb(90, 98, 106)
+  $foot.SetBounds(16, 370, 348, 44)
+  $form.Controls.Add($foot)
 
-$helpLabel = New-Object System.Windows.Forms.Label
-$helpLabel.Text = 'What do you need help with'
-$helpLabel.Location = New-Object System.Drawing.Point(20, 588)
-$helpLabel.AutoSize = $true
-$form.Controls.Add($helpLabel)
+  $nameHint.Add_Click({ $nameBox.Focus() }.GetNewClosure())
+  $reasonHint.Add_Click({ $reasonBox.Focus() }.GetNewClosure())
+  $helpHint.Add_Click({ $helpBox.Focus() }.GetNewClosure())
+  $nameBox.Add_TextChanged({ $nameHint.Visible = -not $this.Text }.GetNewClosure())
+  $nameBox.Add_GotFocus({ $nameHint.Visible = $false }.GetNewClosure())
+  $nameBox.Add_LostFocus({ $nameHint.Visible = -not $nameBox.Text }.GetNewClosure())
+  $reasonBox.Add_TextChanged({ $reasonHint.Visible = -not $this.Text }.GetNewClosure())
+  $reasonBox.Add_GotFocus({ $reasonHint.Visible = $false }.GetNewClosure())
+  $reasonBox.Add_LostFocus({ $reasonHint.Visible = -not $reasonBox.Text }.GetNewClosure())
+  $helpBox.Add_TextChanged({ $helpHint.Visible = -not $this.Text }.GetNewClosure())
+  $helpBox.Add_GotFocus({ $helpHint.Visible = $false }.GetNewClosure())
+  $helpBox.Add_LostFocus({ $helpHint.Visible = -not $helpBox.Text }.GetNewClosure())
 
-$helpBox = New-Object System.Windows.Forms.TextBox
-$helpBox.Location = New-Object System.Drawing.Point(20, 610)
-$helpBox.Size = New-Object System.Drawing.Size(460, 28)
-$form.Controls.Add($helpBox)
-
-$help = New-Object System.Windows.Forms.Button
-$help.Text = 'Request remote help'
-$help.Location = New-Object System.Drawing.Point(20, 646)
-$help.Size = New-Object System.Drawing.Size(180, 34)
-$form.Controls.Add($help)
-
-$logBox = New-Object System.Windows.Forms.TextBox
-$logBox.Multiline = $true
-$logBox.ReadOnly = $true
-$logBox.ScrollBars = 'Vertical'
-$logBox.Location = New-Object System.Drawing.Point(20, 690)
-$logBox.Size = New-Object System.Drawing.Size(460, 72)
-$form.Controls.Add($logBox)
-
-function Update-LogView {
-  if (Test-Path $LogPath) {
-    $lines = Get-Content -Path $LogPath -Tail 8 -ErrorAction SilentlyContinue
-    $logBox.Text = ($lines -join [Environment]::NewLine)
-  }
-}
-
-function Update-Window {
-  try {
-    $config = Get-AgentConfig
-    $state = $null
-    try { $state = Invoke-AgentRpc $config 'agent_state' @{ p_token = [string]$config.token } } catch { $state = $null }
-    if ($state -and [string]$state.state -eq 'pending') {
-      $status.Text = @(
-        'Waiting for IT to assign this computer.',
-        ('System: ' + [string]$state.hostname),
-        ('Account: ' + [string]$state.windows_user)
-      ) -join [Environment]::NewLine
-      $rules.Items.Clear()
-      Update-LogView
-      return
+  $refresh = {
+    try {
+      $config = Get-AgentConfig
+      $state = $null
+      try { $state = Invoke-AgentRpc $config 'agent_state' @{ p_token = [string]$config.token } } catch { $state = $null }
+      if ($state -and [string]$state.state -eq 'pending') {
+        $status.Text = "Waiting for IT to assign this computer.`r`n" + [string]$state.hostname + ' · ' + [string]$state.windows_user
+        return
+      }
+      $policy = Get-Policy $config
+      if (-not $nameBox.Text -and $policy.assigned_to) {
+        $nameBox.Text = [string]$policy.assigned_to
+        $nameHint.Visible = $false
+      }
+      $adminText = switch ([string]$policy.admin) {
+        'standing' { 'Standing admin' }
+        'elevated' { 'Temporary admin' }
+        default { 'Standard user' }
+      }
+      $status.Text = ([string]$policy.tag + '  ·  ' + $adminText)
+    } catch {
+      $status.Text = 'Could not reach IT. ' + $_.Exception.Message
     }
-    $policy = Get-Policy $config
-    if (-not $nameBox.Text -and $policy.assigned_to) { $nameBox.Text = [string]$policy.assigned_to }
-    $adminText = switch ([string]$policy.admin) {
-      'standing' { 'Standing admin' }
-      'elevated' { 'Temporary admin until ' + [string]$policy.elevation_ends_at }
-      default { 'Standard user' }
-    }
-    $holdText = if ([bool]$policy.hold) { 'On hold. ' + [string]$policy.hold_reason } else { 'Not on hold' }
-    $network = 'Network location is sent to IT.'
-    $cache = Join-Path $Root 'presence-cache.json'
-    if (Test-Path $cache) {
-      try {
-        $geo = Get-Content -Path $cache -Raw -Encoding UTF8 | ConvertFrom-Json
-        $network = ('Network: ' + [string]$geo.city + ', ' + [string]$geo.country_code + ' · ' + [string]$geo.ip).Trim()
-      } catch { }
-    }
-    $status.Text = @(
-      ([string]$policy.tag + '  ' + [string]$policy.description),
-      $adminText,
-      $holdText,
-      $network
-    ) -join [Environment]::NewLine
-    $rules.Items.Clear()
-    foreach ($rule in @($policy.rules)) { [void]$rules.Items.Add([string]$rule) }
-    Update-LogView
-  } catch {
-    $status.Text = 'Could not reach Control. ' + $_.Exception.Message
-  }
-}
+  }.GetNewClosure()
 
-$ask.Add_Click({
-  try {
-    $who = $nameBox.Text.Trim()
-    $why = $reasonBox.Text.Trim()
-    if ($who.Length -lt 2) { throw 'Enter your name.' }
-    if ($why.Length -lt 8) { throw 'Write a short reason, at least a few words.' }
-    $config = Get-AgentConfig
-    Invoke-AgentRpc $config 'agent_request' @{ p_token = $config.token; p_requested_by = $who; p_reason = $why }
-    $reasonBox.Text = ''
-    Write-AgentLog "Admin request sent for $who."
-    [System.Windows.Forms.MessageBox]::Show('Request sent. IT will see it in Control. You stay a standard user until someone approves a short window.', 'Mulk Agent')
-    Update-LogView
-  } catch {
-    [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Mulk Agent')
-  }
-})
+  $ask.Add_Click({
+    try {
+      $who = $nameBox.Text.Trim()
+      $why = $reasonBox.Text.Trim()
+      if ($who.Length -lt 2) { throw 'Enter your name.' }
+      if ($why.Length -lt 8) { throw 'Write a short reason, at least a few words.' }
+      $config = Get-AgentConfig
+      Invoke-AgentRpc $config 'agent_request' @{ p_token = $config.token; p_requested_by = $who; p_reason = $why }
+      $reasonBox.Text = ''
+      $reasonHint.Visible = $true
+      Write-AgentLog "Admin request sent for $who."
+      Show-AgentMessage 'Request sent. IT will answer in a popup on this computer. You stay a standard user until they approve.'
+    } catch {
+      Show-AgentMessage $_.Exception.Message
+    }
+  }.GetNewClosure())
 
-$refresh.Add_Click({ Update-Window })
-$help.Add_Click({
-  try {
-    $who = $nameBox.Text.Trim()
-    $why = $helpBox.Text.Trim()
-    if ($who.Length -lt 2) { throw 'Enter your name.' }
-    if ($why.Length -lt 8) { throw 'Write what you need help with, at least a few words.' }
-    $config = Get-AgentConfig
-    Invoke-AgentRpc $config 'agent_request_support' @{ p_token = $config.token; p_requested_by = $who; p_reason = $why }
-    $helpBox.Text = ''
-    Write-AgentLog "Remote help requested for $who."
-    [System.Windows.Forms.MessageBox]::Show('Request sent. IT will see it on the dashboard. Nothing connects until you choose Allow.', 'Mulk Agent')
-    Update-LogView
-  } catch {
-    [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Mulk Agent')
-  }
-})
-$script:supportPrompt = $false
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 300000
-$timer.Add_Tick({ Update-Window })
-$timer.Start()
-$form.ShowInTaskbar = $true
-$form.Add_FormClosing({
-  $_.Cancel = $true
-  $form.Hide()
-  $form.ShowInTaskbar = $false
-})
-$form.Add_Shown({ Update-Window })
-$script:supportForm = $form
-$form.Show()
-$form.Activate()
+  $help.Add_Click({
+    try {
+      $who = $nameBox.Text.Trim()
+      $why = $helpBox.Text.Trim()
+      if ($who.Length -lt 2) { throw 'Enter your name.' }
+      if ($why.Length -lt 8) { throw 'Write what you need help with, at least a few words.' }
+      $config = Get-AgentConfig
+      Invoke-AgentRpc $config 'agent_request_support' @{ p_token = $config.token; p_requested_by = $who; p_reason = $why }
+      $helpBox.Text = ''
+      $helpHint.Visible = $true
+      Write-AgentLog "Remote help requested for $who."
+      Show-AgentMessage 'Request sent. When IT is ready, a box will ask you to type their code.'
+    } catch {
+      Show-AgentMessage $_.Exception.Message
+    }
+  }.GetNewClosure())
+
+  $form.Add_FormClosing({
+    $_.Cancel = $true
+    $form.Hide()
+    $form.ShowInTaskbar = $false
+  }.GetNewClosure())
+  $form.Tag = $refresh
+  $form.Add_Shown($refresh)
+  $script:supportForm = $form
+  $form.ShowInTaskbar = $true
+  $form.Show()
+  $form.Activate()
 }
 
 function New-TrayIcon {
@@ -1788,9 +1816,15 @@ function Start-Tray {
       Remove-Item -Path $flag -Force -ErrorAction SilentlyContinue
       Show-SupportWindow
     }
+    if (($script:trayTicks % 8) -eq 0) {
+      try {
+        $config = Get-AgentConfig
+        Show-PendingNotice $config
+      } catch { }
+      try { Ask-RemoteApproval } catch { }
+    }
     if (($script:trayTicks % 150) -eq 0) {
       try { Add-ActivitySample } catch { }
-      try { Ask-RemoteApproval } catch { }
       try { Update-Unattended } catch { }
     }
   })

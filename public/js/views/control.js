@@ -846,7 +846,7 @@ function supportNote(asset) {
     return '<p class="muted" style="margin:8px 0 0">Run <span class="mono">supabase/support.sql</span> once so remote support can be queued.</p>';
   }
   const rows = (ui.support || []).filter(s => s.asset_id === asset.id).slice(0, 3);
-  if (!rows.length) return '<p class="muted" style="margin:8px 0 0">No help request yet. The person asks from the Mulk Agent window. Nothing connects until they choose Allow.</p>';
+  if (!rows.length) return '<p class="muted" style="margin:8px 0 0">No help request yet. The person asks from the Mulk Agent box. Nothing connects until they type the code you read to them.</p>';
   const label = {
     requested: 'Asked for help',
     pending: 'Waiting for them to allow',
@@ -1043,10 +1043,10 @@ function detail(a) {
       </div>
       <div>
         <h2 style="margin-bottom:8px">Remote support</h2>
-        <p class="muted" style="margin:0">The person asks from the Mulk Agent window, or you can ask from here. Either way, Quick Assist opens only after they choose Allow on that computer. The screen is not saved, and the keyboard is not recorded.</p>
+        <p class="muted" style="margin:0">The person asks from the Mulk Agent box, or you can ask from here. Either way, you read a code and they type it. Quick Assist opens only after the code matches. The screen is not saved, and the keyboard is not recorded.</p>
         ${supportNote(a)}
         <div class="row" style="margin-top:10px">
-          <button type="button" class="btn sm" data-act="support" ${ui.supportReady && !c.locked && !(ui.support || []).some(s => s.asset_id === a.id && (s.status === 'pending' || s.status === 'asking')) ? '' : 'disabled'}>${helpWaiting().some(s => s.asset_id === a.id) ? 'Connect' : 'Ask to connect'}</button>
+          <button type="button" class="btn sm" data-act="support" ${ui.supportReady && !c.locked && !(ui.support || []).some(s => s.asset_id === a.id && (s.status === 'pending' || s.status === 'asking')) ? '' : 'disabled'}>${helpWaiting().some(s => s.asset_id === a.id) ? 'Send code' : 'Ask with a code'}</button>
         </div>
       </div>
       <div>
@@ -1188,7 +1188,7 @@ function helpPopup() {
     <div class="pop-card">
       <div class="card-h"><h2>Remote help</h2><button type="button" class="btn ghost icon-btn" id="close-help" aria-label="Close">✕</button></div>
       <div class="card-b">
-        <p class="muted" style="margin:0 0 12px">The person asked from the Mulk Agent window. Connect asks them to choose Allow. Quick Assist opens only after they do. The screen is not saved.</p>
+        <p class="muted" style="margin:0 0 12px">Send a code, then read it to the person. Their computer asks them to type it. Quick Assist opens only after the code matches. The screen is not saved.</p>
         ${rows.length ? rows.map(r => {
           const a = assetTag(r.asset_id);
           return `<div class="req">
@@ -1196,7 +1196,7 @@ function helpPopup() {
             <p style="margin:6px 0">${esc(r.reason || '')}</p>
             <div class="sub">${fmtDateTime(r.requested_at)}</div>
             <div class="row" style="margin-top:8px">
-              <button type="button" class="btn sm primary" data-connect="${esc(r.id)}">Connect</button>
+              <button type="button" class="btn sm primary" data-connect="${esc(r.id)}">Send code</button>
               <button type="button" class="btn sm danger" data-decline-help="${esc(r.id)}">Decline</button>
             </div>
           </div>`;
@@ -1245,6 +1245,10 @@ async function approveRequest(main, id, windowChoice) {
       : `Approved ${req.requested_by} until 18:00 GST (${fmtDateTime(ends)})`;
     await persist(asset, { ...c, admin: 'elevated', elevation_ends_at: ends, admin_note: null }, 'admin', detail);
     await decideRequest(req, 'approved', { window_choice: windowChoice });
+    const reply = hours
+      ? `IT approved admin rights for ${hours} hour${hours === 1 ? '' : 's'}, until ${fmtDateTime(ends)}.`
+      : `IT approved admin rights until 18:00.`;
+    try { await store.db.rpc('admin_add_notice', { p_asset_id: asset.id, p_message: reply }); } catch { /* the computer shows it when the notice store exists */ }
     if (!pending().length) ui.showPopup = false;
     toast('Temporary admin granted');
     paint(main);
@@ -1269,6 +1273,7 @@ async function denyRequest(main, id) {
   if (!ok) return;
   try {
     await decideRequest(req, 'denied', { decision_note: reason });
+    try { await store.db.rpc('admin_add_notice', { p_asset_id: req.asset_id, p_message: `IT did not approve admin rights. ${reason}` }); } catch { /* shown when the notice store exists */ }
     if (!pending().length) ui.showPopup = false;
     toast('Request denied');
     paint(main);
@@ -1467,33 +1472,27 @@ async function askBulkInstall(main) {
   }
 }
 
-async function supportCodeFromForm() {
-  let code = '';
-  const ok = await modal({
-    title: 'Ask them to allow',
-    submit: 'Ask to connect',
-    body: `<p style="margin:0">Nothing opens until the person chooses Allow on that computer. On your own PC, open Quick Assist and choose Help someone. Paste the code so their screen can show it after they allow.</p>
-      <label class="f">Quick Assist code, optional<input name="code" inputmode="numeric" maxlength="8" placeholder="6 digit code" autocomplete="off"></label>
-      <p class="muted" style="margin:8px 0 0">Leave this blank if you will read the code to them after they allow. The screen is not saved.</p>`,
-    onSubmit(form) {
-      code = form.code.value.trim();
-      if (code && !/^[0-9]{6,8}$/.test(code)) throw new Error('The Quick Assist code is 6 to 8 digits, or leave it blank.');
-    },
+async function showSupportCode(code) {
+  const text = String(code || '').replace(/^"|"$/g, '');
+  await modal({
+    title: 'Read this code',
+    submit: 'Done',
+    cancel: 'Close',
+    body: `<p style="margin:0">Read this code to the person. Their computer will ask them to type it. Quick Assist opens only after it matches. On your PC, open Quick Assist and choose Help someone.</p>
+      <p class="mono" style="font-size:32px;letter-spacing:.18em;margin:14px 0">${esc(text)}</p>
+      <p class="muted" style="margin:0">The screen is not saved.</p>`,
   });
-  return ok ? code : null;
 }
 
 async function connectHelp(main, id) {
   const row = helpWaiting().find(r => String(r.id) === String(id));
   if (!row) return;
-  const code = await supportCodeFromForm();
-  if (code == null) return;
   try {
-    await store.db.rpc('admin_accept_support', { p_id: row.id, p_code: code || null });
+    const code = await store.db.rpc('admin_accept_support', { p_id: row.id, p_code: null });
     if (!helpWaiting().filter(r => r.id !== row.id).length) ui.showHelp = false;
-    toast('Waiting for them to choose Allow. Nothing opens until they do.');
     await loadOps();
     paint(main);
+    await showSupportCode(code);
   } catch (err) {
     toast(err.message || String(err), true);
   }
@@ -1528,14 +1527,13 @@ async function declineHelp(main, id) {
 
 async function askSupport(main, asset) {
   const asked = helpWaiting().find(s => s.asset_id === asset.id);
-  const code = await supportCodeFromForm();
-  if (code == null) return;
   try {
-    if (asked) await store.db.rpc('admin_accept_support', { p_id: asked.id, p_code: code || null });
-    else await store.db.rpc('admin_request_support', { p_asset_id: asset.id, p_code: code || null });
-    toast('Waiting for them to choose Allow. Nothing opens until they do.');
+    const code = asked
+      ? await store.db.rpc('admin_accept_support', { p_id: asked.id, p_code: null })
+      : await store.db.rpc('admin_request_support', { p_asset_id: asset.id, p_code: null });
     await loadOps();
     paint(main);
+    await showSupportCode(code);
   } catch (err) {
     toast(err.message || String(err), true);
   }

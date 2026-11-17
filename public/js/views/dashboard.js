@@ -67,10 +67,10 @@ export async function dashboardView(main) {
             <td>${asset ? `<span class="tag">${esc(asset.tag)}</span>` : ''}<div class="sub">${esc(r.requested_by || '')}${r.reason ? ' · ' + esc(r.reason) : ''}</div></td>
             <td><span class="badge ${r.status === 'requested' ? 'st-under_repair' : 'st-checked_out'}">${esc(helpLabel[r.status] || r.status)}</span></td>
             <td class="sub">${fmtDateTime(r.requested_at)}</td>
-            <td>${r.status === 'requested' ? `<div class="row"><button type="button" class="btn sm primary" data-help-connect="${esc(r.id)}">Connect</button><button type="button" class="btn sm danger" data-help-decline="${esc(r.id)}">Decline</button></div>` : ''}</td>
+            <td>${r.status === 'requested' ? `<div class="row"><button type="button" class="btn sm primary" data-help-connect="${esc(r.id)}">Send code</button><button type="button" class="btn sm danger" data-help-decline="${esc(r.id)}">Decline</button></div>` : ''}</td>
           </tr>`;
         }).join('')}
-      </tbody></table></div>` : '<div class="empty">Nobody is waiting. The person chooses Request remote help in the Mulk Agent window. Connect from here, and they must choose Allow before Quick Assist opens. The screen is not saved.</div>'}
+      </tbody></table></div>` : '<div class="empty">Nobody is waiting. The person chooses Request remote help in Mulk Agent. Send a code and read it to them. Quick Assist opens after they type it. The screen is not saved.</div>'}
     </div>
     <div class="kpis">
       ${kpi(null, 'Total assets')}
@@ -177,23 +177,18 @@ export async function dashboardView(main) {
 }
 
 async function connectHelp(main, id) {
-  let code = '';
-  const ok = await modal({
-    title: 'Ask them to allow',
-    submit: 'Ask to connect',
-    body: `<p style="margin:0">Nothing opens until the person chooses Allow on that computer. On your own PC, open Quick Assist and choose Help someone. Paste the code so their screen can show it after they allow.</p>
-      <label class="f">Quick Assist code, optional<input name="code" inputmode="numeric" maxlength="8" placeholder="6 digit code" autocomplete="off"></label>
-      <p class="muted" style="margin:8px 0 0">Leave this blank if you will read the code to them after they allow. The screen is not saved.</p>`,
-    onSubmit(form) {
-      code = form.code.value.trim();
-      if (code && !/^[0-9]{6,8}$/.test(code)) throw new Error('The Quick Assist code is 6 to 8 digits, or leave it blank.');
-    },
-  });
-  if (!ok) return;
   try {
-    await store.db.rpc('admin_accept_support', { p_id: id, p_code: code || null });
-    toast('Waiting for them to choose Allow. Nothing opens until they do.');
+    const code = await store.db.rpc('admin_accept_support', { p_id: id, p_code: null });
+    const text = String(code || '').replace(/^"|"$/g, '');
     await dashboardView(main);
+    await modal({
+      title: 'Read this code',
+      submit: 'Done',
+      cancel: 'Close',
+      body: `<p style="margin:0">Read this code to the person. Their computer asks them to type it. Quick Assist opens only after it matches. On your PC, open Quick Assist and choose Help someone.</p>
+        <p class="mono" style="font-size:32px;letter-spacing:.18em;margin:14px 0">${esc(text)}</p>
+        <p class="muted" style="margin:0">The screen is not saved.</p>`,
+    });
   } catch (err) {
     toast(err.message || String(err), true);
   }
