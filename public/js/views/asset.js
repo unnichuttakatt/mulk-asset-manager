@@ -192,14 +192,14 @@ export async function assetView(main, params, id) {
     </div>`;
 
   main.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
-    if (b.dataset.act === 'check_out' && lockRow?.locked) {
-      toast('This asset is locked. Unlock it in Control before checking it out.', true);
-      return;
-    }
-    if (await runAction(b.dataset.act, a)) {
-      invalidate();
-      toast(`${ACTION_LABEL[b.dataset.act] || 'Saved'} — ${a.tag}`);
-      assetView(main, params, id);
+    try {
+      if (await runAction(b.dataset.act, a)) {
+        invalidate();
+        toast(`${ACTION_LABEL[b.dataset.act] || 'Saved'} — ${a.tag}`);
+        assetView(main, params, id);
+      }
+    } catch (err) {
+      toast(err.message || String(err), true);
     }
   });
   $('#label').onclick = () => { setLabelSelection([a.id]); location.hash = '#/labels'; };
