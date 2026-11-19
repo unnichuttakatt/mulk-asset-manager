@@ -63,6 +63,131 @@ export function distinct(field, rows = store.assets || []) {
   return [...m.values()].sort((a, b) => a.localeCompare(b));
 }
 
+export const personKey = (name) => String(name || '').trim().toLowerCase();
+
+export function mergeNames(...lists) {
+  const m = new Map();
+  for (const list of lists) {
+    for (const raw of list || []) {
+      const v = String(raw ?? '').trim();
+      if (!v) continue;
+      const k = personKey(v);
+      if (!m.has(k)) m.set(k, v);
+    }
+  }
+  return [...m.values()].sort((a, b) => a.localeCompare(b));
+}
+
+export function isMissingEmployees(err) {
+  const msg = String(err?.message || err || '');
+  return err?.status === 404 || /schema cache/i.test(msg) || /does not exist/i.test(msg) || /could not find the table/i.test(msg);
+}
+
+// One row per person currently named on an asset, using the latest assignment for department and site.
+export function peopleFromAssets(assets = []) {
+  const m = new Map();
+  for (const a of assets) {
+    const name = String(a.assigned_to || '').trim();
+    if (!name) continue;
+    const k = personKey(name);
+    const stamp = String(a.updated_at || a.last_event_date || '');
+    const prev = m.get(k);
+    if (!prev || stamp >= prev.stamp) {
+      m.set(k, {
+        name,
+        department: String(a.department || '').trim() || prev?.department || '',
+        site: String(a.site || '').trim() || prev?.site || '',
+        stamp,
+      });
+    } else {
+      if (!prev.department && a.department) prev.department = String(a.department).trim();
+      if (!prev.site && a.site) prev.site = String(a.site).trim();
+    }
+  }
+  return [...m.values()];
+}
+
+export function assetsForPerson(assets, name) {
+  const k = personKey(name);
+  if (!k) return [];
+  return (assets || []).filter(a => personKey(a.assigned_to) === k && a.status !== 'disposed');
+}
+
+// null means the employees table is not installed yet.
+export async function listEmployees() {
+  try {
+    return await store.db.selectAll('employees', { select: '*', order: 'name.asc' });
+  } catch (err) {
+    if (isMissingEmployees(err)) return null;
+    throw err;
+  }
+}
+
+export async function employeeNames() {
+  const assets = store.assets || await loadAssets().catch(() => []);
+  let saved = [];
+  try {
+    const rows = await listEmployees();
+    saved = (rows || []).filter(e => e.active !== false).map(e => e.name);
+  } catch { /* suggestions still include people already on assets */ }
+  return mergeNames(saved, distinct('assigned_to', assets));
+}
+
+// Insert people who are on an asset but missing from the employee list. No-op until employees.sql has been run.
+export async function syncAssignedEmployees(assets) {
+  const saved = await listEmployees();
+  if (saved == null) return { storage: false, rows: null, added: 0 };
+  const have = new Set(saved.map(e => personKey(e.name)));
+  const missing = peopleFromAssets(assets).filter(p => !have.has(personKey(p.name)));
+  if (!missing.length) return { storage: true, rows: saved, added: 0 };
+  const payload = missing.map(p => ({
+    name: p.name,
+    department: p.department || null,
+    site: p.site || null,
+    origin: 'asset',
+    active: true,
+  }));
+  let added = 0;
+  try {
+    await store.db.insert('employees', payload);
+    added = payload.length;
+  } catch (err) {
+    if (!/duplicate|unique/i.test(String(err?.message || ''))) throw err;
+    for (const row of payload) {
+      try {
+        await store.db.insert('employees', [row]);
+        added += 1;
+      } catch (one) {
+        if (!/duplicate|unique/i.test(String(one?.message || ''))) throw one;
+      }
+    }
+  }
+  const rows = await listEmployees();
+  return { storage: true, rows: rows || saved, added };
+}
+
+export async function rememberEmployee({ name, department, site }) {
+  const clean = String(name || '').trim();
+  if (!clean) return { saved: false };
+  const rows = await listEmployees();
+  if (rows == null) return { saved: false, missing: true };
+  if (rows.some(r => personKey(r.name) === personKey(clean))) return { saved: true };
+  try {
+    await store.db.insert('employees', [{
+      name: clean,
+      department: String(department || '').trim() || null,
+      site: String(site || '').trim() || null,
+      origin: 'asset',
+      active: true,
+    }]);
+    return { saved: true };
+  } catch (err) {
+    if (isMissingEmployees(err)) return { saved: false, missing: true };
+    if (/duplicate|unique/i.test(String(err?.message || ''))) return { saved: true };
+    return { saved: false, error: err };
+  }
+}
+
 export function countBy(rows, field) {
   const m = new Map();
   for (const r of rows) {

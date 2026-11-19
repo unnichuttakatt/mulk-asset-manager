@@ -1,5 +1,5 @@
 import { esc, icon, toast, modal, fmtDate, fmtDateTime, fmtMoney, today, datalist, qrSvg, ensureQr, $, $$ } from '../ui.js';
-import { store, ctx, loadAssets, distinct, STATUS, ACTION_LABEL, exportXlsx, exportSheets } from '../data.js';
+import { store, ctx, loadAssets, distinct, STATUS, ACTION_LABEL, exportXlsx, exportSheets, employeeNames } from '../data.js';
 import { assetUrl } from './asset.js';
 import { setLabelSelection } from './assets.js';
 
@@ -120,7 +120,8 @@ export async function reportsView(main) {
     <div class="stack">
       <div class="card"><div class="card-h"><h2>Employee lookup</h2><span class="muted">e.g. for joiners & leavers</span></div>
         <div class="card-b stack">
-          <div class="row" style="flex-wrap:nowrap"><input id="person" list="dl-p" placeholder="Type an employee name…" autocomplete="off">${datalist('dl-p', distinct('assigned_to', assets))}</div>
+          <div class="row" style="flex-wrap:nowrap"><input id="person" list="dl-p" placeholder="Type an employee name…" autocomplete="off">${datalist('dl-p', await employeeNames())}</div>
+          <div class="muted">Names include the employee list and anyone an asset is assigned to. <a href="#/employees">Add or edit employees</a>.</div>
           <div id="person-out" class="muted">Pick a person to see everything checked out to them.</div>
         </div></div>
       <div class="report-list">${reports.map(([t, d], i) => `<div class="card report"><h2>${esc(t)}</h2><p>${esc(d)}</p><button class="btn" data-r="${i}">${icon('download')} Download</button></div>`).join('')}

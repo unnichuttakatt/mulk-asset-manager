@@ -1,11 +1,11 @@
 import { esc, icon, toast, modal, fmtDate, fmtDateTime, fmtMoney, today, datalist, qrSvg, ensureQr, $ } from '../ui.js';
-import { store, loadAssets, invalidate, distinct, suggestTag, STATUS, ACTIONS_FOR, ACTION_BUTTON, ACTION_LABEL } from '../data.js';
+import { store, loadAssets, invalidate, distinct, suggestTag, STATUS, ACTIONS_FOR, ACTION_BUTTON, ACTION_LABEL, employeeNames, rememberEmployee } from '../data.js';
 import { setLabelSelection } from './assets.js';
 
 export const assetUrl = (id) => `${location.origin}/#/asset/${id}`;
 
-function actionForm(action, a) {
-  const people = datalist('dl-people', distinct('assigned_to'));
+function actionForm(action, a, peopleNames = distinct('assigned_to')) {
+  const people = datalist('dl-people', peopleNames);
   const depts = datalist('dl-dept', distinct('department'));
   const sites = datalist('dl-site', distinct('site'));
   const locs = datalist('dl-loc', distinct('location'));
@@ -33,9 +33,10 @@ function actionForm(action, a) {
 }
 
 async function runAction(action, a) {
+  const peopleNames = action === 'check_out' ? await employeeNames() : distinct('assigned_to');
   return modal({
     title: `${ACTION_BUTTON[action]} — ${a.tag}`,
-    body: actionForm(action, a),
+    body: actionForm(action, a, peopleNames),
     submit: ACTION_BUTTON[action],
     danger: action === 'dispose',
     onSubmit: async (form) => {
@@ -46,6 +47,11 @@ async function runAction(action, a) {
       if (fd.p_cost) args.p_cost = Number(fd.p_cost);
       if (action === 'dispose') args.p_notes = [fd.method, fd.p_notes].filter(Boolean).join(' — ');
       await store.db.rpc('asset_action', args);
+      if (action === 'check_out' && args.p_assigned_to) {
+        try {
+          await rememberEmployee({ name: args.p_assigned_to, department: args.p_department, site: args.p_site });
+        } catch { /* the check-out is already saved; the employee list can catch up on the next visit */ }
+      }
     },
   });
 }

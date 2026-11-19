@@ -9,6 +9,7 @@ A replacement for AssetTiger: a web app hosted on **Vercel** that stores its dat
 - QR labels in three sizes. Scanning a label with a phone camera opens that asset's page
 - Imports the AssetTiger Excel export directly. You can re-import at any time: rows are matched on Asset Tag ID
 - Reports in Excel: full register, assets by employee, department summary, category × status, repairs and disposals, and activity for a date range
+- An **Employees** page to add and edit people. Anyone an asset is already assigned to is included in that list automatically
 - An employee lookup, useful when someone joins or leaves
 - Login for IT admins only, with an allow-list you manage on the **Admins** page
 - A **Control** tab for every asset in the register. Laptops and desktops get admin rights, a one-time local Administrator password change, and a queued MSI or EXE install. Printers get a queue mode. Phones get an enrollment mark. Other assets are controlled by who holds them and whether they are on hold. The page records the decision, the public IP, and the city and country of that IP. It does not read files, capture the screen, record the keyboard, or use GPS.
@@ -85,8 +86,9 @@ You can run the import again whenever you like while both systems are in use. Ex
 
 | Task | Where |
 |---|---|
-| Give a laptop to a new joiner | Asset page → **Check out** → enter name and department |
-| Employee leaves | **Reports → Employee lookup** to see their items, then **Check in** each one |
+| Add or correct an employee | **Employees** → **Add employee** or **Edit**. Anyone already assigned an asset is listed without typing them in again |
+| Give a laptop to a new joiner | Asset page → **Check out** → pick the employee and department |
+| Employee leaves | **Employees** or **Reports → Employee lookup** to see their items, then **Check in** each one |
 | Laptop goes for repair | **Send for repair** (vendor and estimated cost). When it comes back, **Repair complete**. It returns to the same person automatically |
 | Scrap or sell an old device | **Dispose** (method and value). The record and its history are kept |
 | Add a new purchase | **Add asset** → **Suggest** fills the next tag in your numbering pattern (e.g. `MH/LAP/2026/HZF/114`) |
@@ -114,6 +116,7 @@ Status and assignment change only through the action buttons. That way every cha
 
 - **Security:** only signed-in users whose e-mail is on the Admins list can read or change data. This is enforced inside the database (row level security), not only in the browser. Sign-in uses the admin password. Bulk install also asks for a separate install password. The anon key is designed to be public. The agent keeps its device credential for the enrolled Windows account, SYSTEM, and administrators. It does not give that credential to every local user. A short check runs about every 5 minutes. The heavier software, health, USB, and search read runs about every 30 minutes. The agent does not lock Windows sign-in. A bulk install runs an MSI or EXE as SYSTEM, so only queue a file from a vendor you trust, and only from an `https://` link with no embedded password.
 - **Free tier:** Supabase pauses a free project after about a week with no use. You can restore it with one click, and no data is lost. For daily company use, the Pro plan (~$25/month) avoids pausing and adds daily backups. Vercel's free Hobby plan is for non-commercial use, so for company use choose Vercel Pro, or host on a team account.
+- **Employees:** open Supabase → SQL Editor and run `supabase/employees.sql` once. The page still lists people who currently have an asset before that. After it is run, **Add employee** and **Edit** are saved, and checking an asset out adds that person when they are not already on the list. Renaming someone updates the assets still assigned to them.
 - **Control storage:** if that tab says shared storage is not set up, open Supabase → SQL Editor and run `supabase/laptop-control.sql` once. Until then, decisions stay in the browser you are using. A fresh run of `schema.sql` already includes these tables. Re-run the same file if the tab asks for the connection columns.
 - **Mulk Agent:** the Windows program for laptops and desktops. It does not need Intune. After you sign in, download it from the sidebar and run the installer as Administrator. No code is required. The computer then waits in **Control** until you assign it to an asset. Run `supabase/agent.sql` once in Supabase first (and `supabase/laptop-control.sql` if you have not), then `supabase/asset-admin.sql`, `supabase/presence.sql`, `supabase/usage.sql`, `supabase/it-admin.sql`, `supabase/asset-lock.sql`, `supabase/support.sql`, `supabase/unattended.sql`, `supabase/install-gate.sql`, `supabase/local-admin-all.sql`, `supabase/agent-pending.sql`, and `supabase/agent-notices.sql`. Mulk Agent stays in the tray until the person opens it. Remote help opens Windows Quick Assist only after they type the code IT reads to them. An IT reply to admin rights appears in a popup on the computer. Macs are not covered by this installer. The agent reports program names, USB device names, health, the city and country of the public IP, search text, and which app is in front. It does not read files, capture the screen, or record the keyboard.
 - **Backups:** **Reports → Full asset register** downloads everything to Excel. Do this regularly if you stay on the free plan.

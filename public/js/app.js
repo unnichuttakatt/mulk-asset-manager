@@ -6,6 +6,7 @@ import { assetsView } from './views/assets.js';
 import { assetView, assetFormView } from './views/asset.js';
 import { importView } from './views/import.js';
 import { activityView, reportsView, labelsView, settingsView, changePasswordDialog } from './views/misc.js';
+import { employeesView } from './views/employees.js';
 import { controlView } from './views/control.js';
 import { alertsView } from './views/alerts.js';
 import { usageView } from './views/usage.js';
@@ -15,6 +16,7 @@ const app = document.getElementById('app');
 const NAV = [
   ['/', 'Dashboard', 'dash'],
   ['/assets', 'Assets', 'box'],
+  ['/employees', 'Employees', 'person'],
   ['/control', 'Control', 'shield'],
   ['/alerts', 'Alerts', 'bell'],
   ['/usage', 'Usage', 'search'],
@@ -32,6 +34,7 @@ const ROUTES = [
   [/^\/alerts$/, alertsView],
   [/^\/usage$/, usageView],
   [/^\/assets$/, assetsView],
+  [/^\/employees$/, employeesView],
   [/^\/assets\/new$/, (m, p) => assetFormView(m, p, null)],
   [/^\/asset\/([^/]+)\/edit$/, (m, p, id) => assetFormView(m, p, id)],
   [/^\/asset\/([^/]+)$/, (m, p, id) => assetView(m, p, id)],
